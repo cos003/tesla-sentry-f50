@@ -439,28 +439,6 @@ sudo ./uninstall.sh --purge      # 连镜像和归档一起删（不可恢复）
 - [SentryBox](https://github.com/weitanism/sentrybox) —— 车机常驻设备的产品化实践
 - [tesla-sentry-viewer](https://github.com/denysvitali/tesla-sentry-viewer) —— 网页查看器形态参考
 
-## ☕ 赞助
-
-> 本项目完全开源免费，如果它帮到了你，欢迎请作者喝一杯咖啡~ 
-
-<table>
-  <tr>
-    <td align="center"><img src="docs/sponsor/alipay.jpg" width="320" alt="支付宝收款码"><br><sub><b>支付宝</b></sub></td>
-    <td align="center"><img src="docs/sponsor/wechat.jpg" width="320" alt="微信收款码"><br><sub><b>微信支付</b></sub></td>
-  </tr>
-</table>
-
-## 💬 交流群
-
-> 遇到问题、想交流玩法，欢迎扫码加入群聊~
-
-<table>
-  <tr>
-    <td align="center"><img src="docs/sponsor/qq_group.jpg" width="320" alt="QQ群二维码"><br><sub><b>QQ 群：831426822</b></sub></td>
-    <td align="center"><img src="docs/sponsor/wechat_group.png" width="320" alt="微信群二维码"><br><sub><b>微信群</b>（二维码 11月12日前有效，过期进群请联系作者或QQ群）</sub></td>
-  </tr>
-</table>
-
 ## License
 
 [MIT](LICENSE)
