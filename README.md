@@ -98,7 +98,7 @@
 ### 1. 部署（在设备 SSH 里执行）
 
 ```sh
-git clone https://github.com/baicyber/tesla-sentry-f50.git
+git clone https://github.com/cos003/tesla-sentry-f50.git
 cd tesla-sentry-f50
 sudo ./install.sh              # 默认 64G 镜像 + 归档区 /archive
 ```
@@ -209,12 +209,19 @@ TSF_BOX_MAX_GB=12                # 单个分类体积上限 (GB), 0 = 不按体�
 
 # 在线升级 (OTA): 默认依次尝试 GitHub 原生地址 → ghfast 镜像 → jsDelivr,
 # 哪个能通就用哪个; 想换成自己的 fork 或内网源, 改下面两个变量即可
-TSF_OTA_REPO=baicyber/tesla-sentry-f50
+TSF_OTA_REPO=cos003/tesla-sentry-f50
 # TSF_OTA_SOURCES=https://raw.githubusercontent.com/you/repo/main,https://cdn.jsdelivr.net/gh/you/repo@main
 # TSF_OTA_BACKUP=/opt/tesla-sentry/sentry-viewer.bak.py   # 升级前的备份 (回滚用)
 ```
 
 ### 在线升级（OTA）
+
+本 Fork 默认从 `cos003/tesla-sentry-f50` 的 `main` 分支更新。已部署旧版的设备，
+请在 `/etc/tesla-sentry.conf` 中添加或修改 `TSF_OTA_REPO=cos003/tesla-sentry-f50`，
+然后执行 `sudo systemctl restart sentry-viewer.service`。如果已设置 `TSF_OTA_SOURCES`，
+需同步修改或移除该设置，它会覆盖根据仓库名生成的下载源。
+
+当前 OTA 仅替换 `sentry-viewer.py`，不更新同步脚本、frpc 或 systemd 服务文件。
 
 网页右上角 **⚙ → 🔄 更新**：
 
