@@ -1,0 +1,9 @@
+{
+  "server_addr": "frp.example.com",
+  "server_port": 7000,
+  "server_name": "frp.example.com",
+  "remote_port": 18080,
+  "local_port": 8080,
+  "device_id": "pi-zero-01",
+  "token": "REPLACE_WITH_A_RANDOM_TOKEN_OF_AT_LEAST_32_CHARACTERS"
+}

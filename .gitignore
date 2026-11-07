@@ -1,6 +1,15 @@
 # 镜像与运行时数据
 *.img
 *.log
+# Local cloud binding credentials; examples use *.example.json / *.example.toml.
+frp-parameters.json
+frpc.toml
+frps.toml
+*.key
+cloud.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # Python
 __pycache__/

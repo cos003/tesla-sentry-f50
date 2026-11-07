@@ -69,7 +69,7 @@ MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频�
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.4.8"
+APP_VERSION = "2.5.0"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -81,6 +81,86 @@ OTA_BACKUP = os.environ.get("TSF_OTA_BACKUP", "/opt/tesla-sentry/sentry-viewer.b
 OTA_STATE = os.environ.get("TSF_OTA_STATE", "/opt/tesla-sentry/ota-state.json")
 OTA_SRC_PREF = os.path.join(os.path.dirname(OTA_STATE) or ".", "ota-src.json")  # 记住上次最快的源
 _OTA_CACHE = {"t": 0.0, "data": None}
+_BUNDLE_LOCK = threading.Lock()
+_BUNDLE_FILES = ("sentry-viewer.py", "sentry-cloud-sync.py", "sentry-ota.py", "scripts/install-cloud-sync.sh")
+
+
+def _bundle_status():
+    root = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".ota")
+    out = {"bundle_phase": "idle", "bundle_version": "", "bundle_error": "", "bundle_rollback": False}
+    def read(name):
+        try:
+            with open(os.path.join(root, name), encoding="utf-8") as f: return json.load(f)
+        except (OSError, ValueError): return {}
+    request, journal, installed = read("request.json"), read("journal.json"), read("installed.json")
+    out["bundle_phase"] = request.get("phase", journal.get("phase", "idle"))
+    if out["bundle_phase"] in ("queued", "running") and time.time() - request.get("at", time.time()) > 600:
+        out["bundle_phase"] = "failed"
+        out["bundle_error"] = "更新进程未完成，请重试或重启设备恢复"
+    if journal.get("phase") == "installing": out["bundle_phase"] = "installing"
+    out["bundle_rollback"] = journal.get("phase") == "complete"
+    out["bundle_error"] = out["bundle_error"] or read("last-error.json").get("error", "")
+    if installed.get("version"):
+        try:
+            def matches(name, checksum):
+                with open(os.path.join(os.path.dirname(root), name), "rb") as f:
+                    return hashlib.sha256(f.read()).hexdigest() == checksum
+            if set(installed["files"]) == set(_BUNDLE_FILES) and all(
+                matches(name, checksum)
+                for name, checksum in installed["files"].items()):
+                out["bundle_version"] = installed["version"]
+        except (OSError, KeyError): pass
+    return out
+
+
+def _bundle_start(stage=None, rollback=False):
+    root = os.path.dirname(os.path.realpath(__file__))
+    state_dir = os.path.join(root, ".ota")
+    helper = os.path.join(stage, "sentry-ota.py") if stage else os.path.join(root, "sentry-ota.py")
+    args = ["systemd-run", "--collect", "--unit=tesla-sentry-ota", sys.executable, helper,
+            "--root", root, "--port", str(PORT)]
+    args += ["--rollback"] if rollback else ["--stage", stage]
+    with open(os.path.join(state_dir, "request.json"), "w", encoding="utf-8") as f:
+        json.dump({"phase": "queued", "at": int(time.time())}, f)
+    result = subprocess.run(args, capture_output=True, timeout=30)
+    if result.returncode:
+        with open(os.path.join(state_dir, "request.json"), "w", encoding="utf-8") as f:
+            json.dump({"phase": "failed"}, f)
+        raise RuntimeError("无法启动独立 OTA 服务")
+
+
+def _bundle_apply(manifest):
+    if not _BUNDLE_LOCK.acquire(False): return False, "已有更新正在进行"
+    stage = None
+    try:
+        if _bundle_status()["bundle_phase"] in ("queued", "running", "installing"):
+            return False, "已有更新正在进行"
+        if not os.path.isdir("/run/systemd/system") or os.geteuid() != 0:
+            return False, "版本包更新需要以 root 运行的 systemd 设备"
+        if manifest.get("bundle_format") != 1 or set(manifest.get("files", {})) != set(_BUNDLE_FILES):
+            return False, "版本包清单格式不正确"
+        state_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".ota")
+        os.makedirs(state_dir, mode=0o700, exist_ok=True)
+        stage = tempfile.mkdtemp(prefix="stage-", dir=state_dir)
+        for name in _BUNDLE_FILES:
+            expected = manifest["files"][name]
+            if not re.fullmatch(r"[0-9a-f]{64}", expected): raise ValueError("无效的 SHA256")
+            data, _ = _race_get("/%s?ts=%d" % (name, int(time.time())), timeout=60, limit=8 << 20,
+                                validate=lambda d, sha=expected: hashlib.sha256(d).hexdigest() == sha)
+            if name.endswith(".py"): compile(data, name, "exec")
+            path = os.path.join(stage, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f: f.write(data)
+        with open(os.path.join(stage, "version.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        _bundle_start(stage)
+        stage = None  # The independent updater owns the persistent stage.
+        return True, "版本包已校验，正在后台安装；失败将恢复上一版本"
+    except Exception as ex:
+        return False, "版本包更新失败: %s" % ex
+    finally:
+        if stage: shutil.rmtree(stage, ignore_errors=True)
+        _BUNDLE_LOCK.release()
 
 
 def _http_get(url, timeout=10, limit=8 << 20):
@@ -170,6 +250,12 @@ def ota_check(force=False):
     out = {"ok": True, "current": cur, "latest": "", "date": "", "notes": [],
            "has_update": False, "source": "", "error": "",
            "rollback_ready": os.path.isfile(OTA_BACKUP)}
+    bundle = _bundle_status()
+    out.update(bundle)
+    out["rollback_ready"] = out["rollback_ready"] or bundle["bundle_rollback"]
+    if bundle["bundle_phase"] in ("queued", "running", "installing"):
+        out["error"] = "版本包更新正在进行"
+        return out
     try:
         j = ota_latest(force)
     except Exception as ex:
@@ -177,8 +263,10 @@ def ota_check(force=False):
         return out
     latest = str(j.get("version"))
     out.update({"latest": latest, "date": j.get("date") or "", "notes": j.get("notes") or [],
-                "has_update": _vtuple(latest) > _vtuple(cur),
+                "has_update": _vtuple(latest) > _vtuple(cur) or
+                    (j.get("bundle_format") == 1 and latest == cur and bundle["bundle_version"] != latest),
                 "source": urllib.parse.urlsplit(j["_base"]).netloc})
+    if bundle["bundle_error"]: out["error"] = "上次版本包更新未完成或已回滚: " + bundle["bundle_error"]
     return out
 
 
@@ -249,6 +337,11 @@ def ota_apply():
     except Exception as ex:
         return False, "检查更新失败: %s" % ex
     latest = str(j.get("version"))
+    if j.get("bundle_format"):
+        if _vtuple(latest) < _vtuple(APP_VERSION): return False, "更新源版本低于当前版本"
+        if latest == APP_VERSION and _bundle_status()["bundle_version"] == latest:
+            return False, "当前全部组件已是最新版本"
+        return _bundle_apply(j)
     if not _vtuple(latest) > _vtuple(APP_VERSION):
         return False, "当前已是最新版本 (%s)" % APP_VERSION
     # 下载也走多源竞速: 清单来源的镜像突然挂了, 其它源照样能补位
@@ -307,6 +400,14 @@ def ota_apply():
 
 
 def ota_rollback():
+    bundle = _bundle_status()
+    if bundle["bundle_phase"] in ("queued", "running", "installing"):
+        return False, "请等待当前更新结束"
+    if bundle["bundle_rollback"]:
+        try:
+            _bundle_start(rollback=True)
+            return True, "正在恢复上一版本的全部程序和服务配置"
+        except Exception as ex: return False, str(ex)
     if not os.path.isfile(OTA_BACKUP):
         return False, "没有可用的备份 (还没升级过)"
     try:
@@ -2141,7 +2242,8 @@ async function otaCheck(force) {
     document.getElementById('upd-cur').textContent = 'v' + j.current;
     document.getElementById('upd-new').textContent = j.latest ? 'v' + j.latest : '—';
     tag.className = 'updtag' + (j.has_update ? ' new' : '');
-    tag.textContent = j.error ? t('检查失败') : (j.has_update ? t('有新版本') : t('已是最新'));
+    tag.textContent = ['queued','running','installing'].includes(j.bundle_phase) ? '正在更新'
+      : (j.error ? t('检查失败') : (j.has_update ? (j.latest === j.current ? '需要补齐组件' : t('有新版本')) : t('已是最新')));
     const n = document.getElementById('upd-notes');
     if (j.notes && j.notes.length) {
       n.innerHTML = j.notes.map(x => '· ' + esc(x)).join('<br>');
@@ -2150,7 +2252,7 @@ async function otaCheck(force) {
     document.getElementById('upd-go').disabled = !j.has_update;
     document.getElementById('upd-rb').style.display = j.rollback_ready ? '' : 'none';
     msg.textContent = j.error
-      ? t('连不上 GitHub') + ': ' + j.error + ' ' + t('(可稍后重试)')
+      ? j.error
       : (t('来源') + ': ' + (j.source || '-') + (j.date ? ' · ' + j.date : '') + (j.has_update ? '' : ' · ' + t('已是最新')));
     document.getElementById('gear').classList.toggle('hasupd', !!j.has_update);
   } catch (e) {
@@ -2163,8 +2265,11 @@ async function otaWaitBack() {
   for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 1500));
     try {
-      const r = await fetch('/api/live', { cache: 'no-store' });
-      if (r.ok) { location.reload(); return; }
+      const r = await fetch('/api/ota/check', { cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json();
+        if (!['queued','running','installing'].includes(j.bundle_phase)) { location.reload(); return; }
+      }
     } catch (e) {}
   }
   location.reload();
@@ -4292,7 +4397,7 @@ def _mp4_video_samples(fp, max_samples=4000):
     return offs, len_size
 
 
-def parse_telemetry(fp, stride=3):
+def parse_telemetry(fp, stride=3, missing_ap_unknown=False):
     """从 mp4 SEI 提取遥测, 返回 dict 或 None(无SEI)"""
     r = _mp4_video_samples(fp)
     if not r:
@@ -4344,7 +4449,7 @@ def parse_telemetry(fp, stride=3):
                     round(msg.get(6, 0.0), 1),
                     1 if msg.get(9) else 0,
                     1 if msg.get(7) else (2 if msg.get(8) else 0),
-                    int(msg.get(10, 0)),
+                    (int(msg[10]) if 10 in msg else (None if missing_ap_unknown else 0)),
                     round(msg.get(11, 0.0), 6),
                     round(msg.get(12, 0.0), 6),
                     round(msg.get(13, 0.0), 1),
@@ -4352,16 +4457,24 @@ def parse_telemetry(fp, stride=3):
                     round(msg.get(15, 0.0), 2),
                     round(msg.get(16, 0.0), 2),
                 ])
+                if missing_ap_unknown:
+                    if msg.get(7) and msg.get(8):
+                        frames[-1][6] = 3
+                    # Cloud samples distinguish omitted scalar fields from measured zero.
+                    for index, field in ((1, 2), (2, 4), (3, 5), (4, 6), (5, 9),
+                                         (8, 11), (9, 12), (10, 13), (11, 14), (12, 15), (13, 16)):
+                        if field not in msg:
+                            frames[-1][index] = None
     if not frames:
         return None
-    speeds = [f[2] for f in frames]
+    speeds = [f[2] for f in frames if f[2] is not None]
     brakes = sum(1 for f in frames if f[5])
     return {
         "fps": round(fps, 2),
         "count": len(offs),
         "duration": round(dur, 2),
-        "max_speed": max(speeds),
-        "avg_speed": round(sum(speeds) / len(speeds), 1),
+        "max_speed": max(speeds) if speeds else None,
+        "avg_speed": round(sum(speeds) / len(speeds), 1) if speeds else None,
         "brake_ratio": round(brakes * 100.0 / len(frames), 1),
         "frames": frames,
     }
@@ -5288,6 +5401,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # Read-only extraction for the optional uploader: no server, mounts or gadget changes.
+    if "--cloud-telemetry" in sys.argv:
+        try:
+            fp = safe_archive_path(sys.argv[sys.argv.index("--cloud-telemetry") + 1])
+            if not fp or not fp.lower().endswith(".mp4"):
+                raise ValueError("invalid archive file")
+            tel = parse_telemetry(fp, stride=1, missing_ap_unknown=True)
+            duration = tel["duration"] if tel else probe_duration(fp)
+            if duration <= 0:
+                raise ValueError("incomplete media")
+            print(json.dumps({"duration": duration, "frames": tel["frames"] if tel else []}))
+            sys.exit(0)
+        except Exception:
+            print("telemetry extraction failed", file=sys.stderr)
+            sys.exit(3)
     # OTA 自检: 只验证模块能完整加载 (常量/函数定义无误), 不启动服务、不碰硬件
     if "--ota-check" in sys.argv:
         print("ok %s" % APP_VERSION)

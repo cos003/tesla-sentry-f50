@@ -1,0 +1,16 @@
+# Dedicated frps for ONE user's instance. Replace token and certificate paths.
+bindAddr = "0.0.0.0"
+bindPort = 7000
+# Only the cloud backend on this host may access the forwarded Sentry port.
+proxyBindAddr = "127.0.0.1"
+allowPorts = [{ single = 18080 }]
+maxPortsPerClient = 1
+auth.method = "token"
+auth.token = "REPLACE_WITH_A_RANDOM_TOKEN_OF_AT_LEAST_32_CHARACTERS"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+transport.tls.force = true
+transport.tls.certFile = "/etc/frp/server.crt"
+transport.tls.keyFile = "/etc/frp/server.key"
+log.to = "console"
+log.level = "warn"
+log.disablePrintColor = true

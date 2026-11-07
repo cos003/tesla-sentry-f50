@@ -13,6 +13,7 @@
 用户点一下就能升级, 无需重新刷固件或拷文件。
 """
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -42,7 +43,14 @@ def main():
         "version": ver,
         "date": datetime.date.today().isoformat(),
         "notes": notes or ["常规更新"],
+        "bundle_format": 1,
+        "files": {},
     }
+    for name in ("sentry-viewer.py", "sentry-cloud-sync.py", "sentry-ota.py", "scripts/install-cloud-sync.sh"):
+        with open(os.path.join(ROOT, name), "rb") as f:
+            payload = f.read()
+        if name.endswith(".py"): compile(payload, name, "exec")
+        data["files"][name] = hashlib.sha256(payload).hexdigest()
     with open(VER, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")

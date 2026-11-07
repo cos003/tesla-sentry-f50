@@ -1,8 +1,16 @@
 {
-  "version": "2.4.8",
-  "date": "2026-11-07",
+  "version": "2.5.0",
+  "date": "2026-11-08",
   "notes": [
-    "修复: 推送/手动转码纳入全局转码并发闸门, 防止与点播转码叠加触发设备内核 lockup 重启",
-    "新增: 每分钟健康日志 (/opt/tesla-sentry/health.log), 记录内存/负载/ffmpeg进程数, 重启后可复盘死机原因"
-  ]
+    "新增查看器与云上传器整包 OTA、校验和及整组回滚",
+    "新增断电后开机恢复，保留设备凭据与补传队列",
+    "新增逐采样遥测上传，需配套麦特云 0024 迁移"
+  ],
+  "bundle_format": 1,
+  "files": {
+    "sentry-viewer.py": "016fccaa45499f10e8bfa74ec09fef002e4c4a091a7932bfb0cda148d1b46286",
+    "sentry-cloud-sync.py": "2e2febc824bd31f5b42f565f92a794b6b022aca1439db8374be467b88c06165b",
+    "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
+    "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
+  }
 }

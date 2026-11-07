@@ -221,7 +221,9 @@ TSF_OTA_REPO=cos003/tesla-sentry-f50
 然后执行 `sudo systemctl restart sentry-viewer.service`。如果已设置 `TSF_OTA_SOURCES`，
 需同步修改或移除该设置，它会覆盖根据仓库名生成的下载源。
 
-当前 OTA 仅替换 `sentry-viewer.py`，不更新同步脚本、frpc 或 systemd 服务文件。
+systemd 设备支持查看器与云上传器整包 OTA，包含安装脚本、服务单元更新和整组回滚。
+从旧版迁移首次需要先升级查看器，再点一次「补齐组件」，见 [OTA 说明](docs/OTA.md)。
+USB Gadget、录像同步脚本及 frpc 不在版本包内。
 
 网页右上角 **⚙ → 🔄 更新**：
 
@@ -239,6 +241,21 @@ git add -A && git commit -m "release: v2.2.0" && git push
 
 > 若仓库改到别处，记得同时改 `APP_VERSION` 所在的 `OTA_REPO` 或 `TSF_OTA_SOURCES`。
 > 设备没网 / GitHub 被墙时检查会失败，但**已安装的版本照常运行**，不影响看录像。
+
+### 麦特云数据同步（推荐）
+
+Pi 通过 HTTPS 主动上传录像中的事件摘要、FSD/AP/TACC 状态区间，
+支持账号绑定设备、本地持久队列和断网补传；视频保留在 Pi。
+麦特云保存数据后，设备离线也能查询并显示行程状态时间线。
+需要配套麦特云后端版本及数据库迁移，见 [主动同步部署说明](docs/CLOUD_SYNC.md)。
+
+### 麦特云 frp 数据接入（可选）
+
+树莓派可通过独立的 `tesla-sentry-frp.service` 主动连接用户的麦特云实例，
+供后台调用已有事件、录像及 SEI 遥测 API。支持参数文件配置、TLS 服务器证书校验、
+断网重连和开机自启；安装时不修改 USB Gadget 或录像服务。
+部署步骤、云端配置及 API 验证见 [frp 接入说明](docs/FRP.md)。
+当前先支持手工提供参数；麦特云账号登录和参数下发尚未接入。
 
 ### 多语言
 

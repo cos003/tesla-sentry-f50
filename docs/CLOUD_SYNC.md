@@ -1,0 +1,104 @@
+# Sentry → 麦特云主动同步
+
+上传录像中的事件摘要和 SEI 辅助驾驶状态，不上传 MP4，不需要 frp、服务器入站端口或 Sentry 网页密码。
+版本 1.1.0 同时上传带时间偏移的挡位、车速、方向盘角度、转向灯和三轴加速度采样。
+云端须先执行配套 `0024_sentry_samples.sql` 迁移并发布新版接口，再升级上传器。
+本阶段为 Python 标准库实现，支持 Pi Zero W 的 ARMv6；部署前仍需实机测量解析负载和积压。
+
+## 配套版本与部署顺序
+
+1. 先把麦特云配套改动应用到 `myteslacloud`，执行 `0023_sentry.sql` 迁移，再发布对应的 Functions 和前端。
+2. 在麦特云设置页打开「Sentry 数据同步」，选择车辆和**录像文件名的实际 UTC 偏移**，生成一次性绑定凭据。
+3. 在 Pi 的新版 Sentry 源码目录绑定并安装上传服务。
+
+```sh
+# 在 Pi 上执行。凭据在交互提示中输入，不放在命令行或 URL。
+sudo python3 sentry-cloud-sync.py enroll --server https://www.myteslacloud.com
+sudo sh scripts/install-cloud-sync.sh
+```
+
+绑定凭据有效期 10 分钟、只能消费一次。设备 Token 仅保存于 Pi 的
+`/opt/tesla-sentry/cloud.json`（0600），云端只保存其哈希。
+若绑定响应丢失，重新生成绑定凭据；在麦特云撤销可能已创建但未配置的设备。
+不同环境使用各自的域名，不要把生产设备绑到临时预览站点。
+
+安装要求 systemd >= 247。安装脚本使用当前源码安装查看器和上传器，
+为旧查看器保留 `sentry-viewer.pre-cloud.py`，新增只读 `--cloud-telemetry` 提取命令。
+运行中的查看器无需重启，USB Gadget 配置和录像镜像不受此安装步骤影响。
+若安装目录自定义，请同时传入对应配置路径和目录：
+
+```sh
+sudo python3 sentry-cloud-sync.py enroll --config /your/install/dir/cloud.json
+sudo sh scripts/install-cloud-sync.sh /your/install/dir
+```
+
+## 运行与诊断
+
+```sh
+systemctl status sentry-cloud-sync.service --no-pager
+journalctl -u sentry-cloud-sync.service -n 40 --no-pager
+sudo python3 /opt/tesla-sentry/sentry-cloud-sync.py status
+```
+
+服务使用 systemd 临时用户、受保护的凭据和独立 StateDirectory，降低进程优先级，
+限制 CPU 为一个核心的 40%、内存为 160 MB。归档目录及其父目录需要对该用户可读/可遍历；
+默认 `/archive` 通常满足，但不要为此放宽密钥文件或整个 `/root` 的权限。
+设备状态页显示最后上报时间和待上传片段数；它不是视频实时状态。
+
+队列默认 `/var/lib/tesla-sentry-cloud/queue.sqlite`。上传成功后才清除待传标志；
+网络错误指数退避，401/403 等持久错误延后重试，等待期间仍每轮提取新数据。
+数据库存储与进程锁阻止两个上传进程并发处理同一队列。
+待上传上限为 10000 条 / 64 MB；满时保留已有队列并暂停提取，状态显示 backpressure。
+网络长期不可用时，尚未提取就被原录像滚动清理的片段无法恢复。
+已确认且源文件已删除的指纹保留七天，定期清理；SQLite 可复用已释放的页面。
+
+停用上传不会删除已上传的数据：
+
+```sh
+sudo systemctl disable --now sentry-cloud-sync.service
+```
+
+撤销上传权限须在麦特云设置页撤销设备。重新绑定创建新的设备身份，
+应使用新的队列数据库，或先归档旧队列；程序会拒绝把旧队列发给另一个设备/服务器。
+卸载 Sentry 默认保留本地队列，`--purge` 会一并清除。
+新版 systemd 设备支持查看器与上传器整包 OTA，见 [OTA 说明](OTA.md)。
+首次账号绑定和服务启用仍需上述安装步骤；旧版迁移需先升级查看器，再补齐组件。
+
+## 数据含义
+
+同一组时间戳的四/六路录像选一路有效遥测，优先 front。复制完成的正式文件才参与提取，
+解析前后校验文件大小和修改时间。内容改变在旧版本确认后形成新 revision。
+片段 ID 由归档内分类/目录/时间戳生成，不上报设备绝对文件路径。
+
+- 使用录像文件名作为片段开始时间，按绑定时配置的 UTC 偏移转换成 UTC 毫秒。
+- 相邻有效采样间隔最多 500 ms 才能形成状态段，不延长到录像尾部或跨过缺口。
+- 保留原始状态：当前沿用查看器 `1=FSD / 2=AP / 3=TACC` 映射。
+- 云提取模式下 AP 字段缺失为未知，不能假设为 0；原网页的既有解析行为保持兼容。
+- `no_sei` / `no_ap` 不产生任何已知状态区间，不表示未开启辅助驾驶。
+- 状态变化时刻受现有解析器的采样间隔和帧时间估算影响，不是精确控制信号。
+
+云提取按每个视频样本读取 SEI（上限沿用解析器的 4000 个样本）。
+telemetry.fields 定义采样列，telemetry.samples 保存逐点数据，缺失标量为 null；
+文件指纹包含本次提取格式版本，旧队列确认后会对仍在本地的录像生成新版 revision。
+已被删除且之前仅上传状态段的录像，无法补出详细采样。每批数据按大小控制在 900 KB 内。
+
+中国通常配置 `480`，但应先对照一段实际录像的文件名、车机时间和行程时间验证。
+本阶段使用固定 UTC 偏移，使用夏令时或跨时区后应重新绑定；不会自动猜测历史录像的时区。
+不要将含旧时区录像的归档在新偏移下重新提取。
+
+后台返回不同来源的观测，前端对重叠且矛盾的状态显示未知。
+设备绑定保存车辆 VIN 快照；当前车辆 VIN 已改变时，不把旧设备数据关联到新车。
+没有 VIN 的数据源依赖车主选择正确车辆，车辆更换后必须撤销旧设备并重新绑定。
+
+## 开发验证
+
+```sh
+python3 -m unittest discover -s tests -v
+# 在配套 myteslacloud 源码中：
+node tests/sentry.test.mjs
+node tests/e2e-sentry.mjs /path/to/tesla-sentry-f50
+```
+
+跨项目测试使用含合成 SEI 的 MP4 容器和真实解析器、SQLite 队列、云端路由/中间件。
+测试通过进程管道传递 HTTP 请求契约，不测试 TCP/TLS，也不代表实车录制已验证。
+测试在客户端退出、视频删除和云端数据库重新打开后继续读取 FSD/AP 时间段。
