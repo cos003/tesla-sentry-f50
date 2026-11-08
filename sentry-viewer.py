@@ -69,7 +69,7 @@ MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频�
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -706,7 +706,7 @@ select.ninput { cursor:pointer; }
 </style></head><body>
 <header><h1>🚗 特斯拉哨兵查看器</h1><span class="sub" id="stat"></span>
 <span id="live" title="车机在线只读同步状态" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:4px 10px;white-space:nowrap"><span id="livedot" style="width:7px;height:7px;border-radius:50%;background:#5f6b76"></span><span id="livetxt">同步状态</span></span>
-<nav class="tabs" id="tabs"></nav><button id="theme" title="主题: 自动/浅色/深色" onclick="cycleTheme()">🌗</button><button id="gear" title="设置">⚙</button></header>
+<nav class="tabs" id="tabs"></nav><button id="theme" title="主题: 自动/浅色/深色" onclick="cycleTheme()">🌗</button><a href="/sei-diagnostics" style="color:inherit;font-size:13px;margin:0 10px">SEI 诊断</a><button id="gear" title="设置">⚙</button></header>
 <nav class="storwrap" id="storwrap" style="display:none">
   <div class="storcard">
     <div class="storrow"><span class="storlab" id="storlab">车载U盘存储</span><span class="storval" id="storval"></span></div>
@@ -4278,7 +4278,7 @@ def _strip_emulation(b):
     return bytes(out)
 
 
-def _mp4_video_samples(fp, max_samples=4000):
+def _mp4_video_samples(fp, max_samples=4000, trace=None):
     """解析 moov, 返回 [(offset, size), ...] 与 lenSize; 失败返回 None"""
     with open(fp, "rb") as f:
         d = f.read(4096)
@@ -4328,6 +4328,8 @@ def _mp4_video_samples(fp, max_samples=4000):
                 moov_rng = (pos + hsz, pos + size)
                 break
             pos += size
+    if trace is not None:
+        trace["moov_found"] = bool(moov_rng)
     if not moov_rng:
         return None
     with open(fp, "rb") as f:
@@ -4358,6 +4360,8 @@ def _mp4_video_samples(fp, max_samples=4000):
         if stsd and moov.find(b"avcC", stsd[0], stsd[1]) > 0:
             stbl = r3
             break
+    if trace is not None:
+        trace["h264_track_found"] = bool(stbl)
     if not stbl:
         return None
     s, e = stbl
@@ -4394,16 +4398,20 @@ def _mp4_video_samples(fp, max_samples=4000):
             offs.append((o, sizes[si]))
             o += sizes[si]
             si += 1
+    if trace is not None:
+        trace.update(total_samples=n, indexed_samples=len(offs), nal_length_bytes=len_size, sample_limit=max_samples)
     return offs, len_size
 
 
-def parse_telemetry(fp, stride=3, missing_ap_unknown=False):
+def parse_telemetry(fp, stride=3, missing_ap_unknown=False, trace=None):
     """从 mp4 SEI 提取遥测, 返回 dict 或 None(无SEI)"""
-    r = _mp4_video_samples(fp)
+    r = _mp4_video_samples(fp, trace=trace) if trace is not None else _mp4_video_samples(fp)
     if not r:
         return None
     offs, len_size = r
     dur = probe_duration(fp)
+    if trace is not None:
+        trace.update(duration_s=dur, scanned_samples=0, nal_units=0, sei_units=0, tesla_markers=0, decoded_messages=0, invalid_nal_lengths=0, fields={}, raw_examples=[])
     if not dur or len(offs) < 2:
         return None
     fps = len(offs) / float(dur)
@@ -4412,6 +4420,8 @@ def parse_telemetry(fp, stride=3, missing_ap_unknown=False):
     gear_map = {0: "P", 1: "D", 2: "R", 3: "N"}
     with open(fp, "rb") as f, TEL_SEM:
         for k in range(0, len(offs), stride):
+            if trace is not None:
+                trace["scanned_samples"] += 1
             o, ln = offs[k]
             if o + ln > fsize:
                 continue
@@ -4421,11 +4431,17 @@ def parse_telemetry(fp, stride=3, missing_ap_unknown=False):
             while pos + len_size <= len(data):
                 n2 = int.from_bytes(data[pos:pos + len_size], "big")
                 if n2 <= 0 or pos + len_size + n2 > len(data):
+                    if trace is not None:
+                        trace["invalid_nal_lengths"] += 1
                     break
                 nal = data[pos + len_size:pos + len_size + n2]
                 pos += len_size + n2
+                if trace is not None:
+                    trace["nal_units"] += 1
                 if nal[0] & 0x1F != 6:
                     continue
+                if trace is not None:
+                    trace["sei_units"] += 1
                 # 找 magic: 连续的 0x42 之后遇到 0x69
                 pi = None
                 for i in range(3, min(len(nal), 100)):
@@ -4436,10 +4452,19 @@ def parse_telemetry(fp, stride=3, missing_ap_unknown=False):
                     break
                 if pi is None:
                     continue
+                if trace is not None:
+                    trace["tesla_markers"] += 1
                 payload = _strip_emulation(nal[pi:len(nal) - 1])
                 msg = _pb_decode(payload)
                 if not msg:
                     continue
+                if trace is not None:
+                    trace["decoded_messages"] += 1
+                    for field in msg:
+                        key = str(field)
+                        trace["fields"][key] = trace["fields"].get(key, 0) + 1
+                    if len(trace["raw_examples"]) < 5:
+                        trace["raw_examples"].append({"frame": k, "payload_hex": payload[:128].hex(), "protobuf": msg})
                 spd = msg.get(4, 0.0) * 3.6
                 frames.append([
                     round(k / fps, 2),
@@ -4478,6 +4503,60 @@ def parse_telemetry(fp, stride=3, missing_ap_unknown=False):
         "brake_ratio": round(brakes * 100.0 / len(frames), 1),
         "frames": frames,
     }
+
+
+
+SEI_DIAGNOSTICS_HTML = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SEI 解析诊断</title>
+<style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0b111b;color:#e1eaf6;font:15px system-ui,sans-serif}main{max-width:1050px;margin:auto;padding:28px 20px}a{color:#7fc7ff}h1{font-size:28px;margin:25px 0 10px}p{color:#a8b9ce;line-height:1.7}.panel{background:#131e2d;border:1px solid #2b3b50;border-radius:14px;padding:20px;margin:18px 0}label{display:block;margin:12px 0 8px}input,select,button{font:inherit;border-radius:8px;border:1px solid #41556e;padding:12px;background:#0c1522;color:inherit}input,select{width:100%}button{cursor:pointer;background:#235eaa;margin:14px 8px 0 0}button:disabled{opacity:.5;cursor:wait}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7;font-size:13px}table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;border-bottom:1px solid #304057;padding:10px}#state{color:#8cd5c1}details{margin-top:18px} @media print{button,input,select,label,.intro{display:none}body,.panel{background:white;color:black}pre{font-size:10px}}</style>
+<main><a href="/">← 返回录像</a><h1>SEI 解析诊断</h1><p class="intro">直接运行云上传端使用的解析器，逐帧扫描原始视频，不使用遥测缓存。选择一路视频，查看从 MP4 到车辆字段的解析结果。</p>
+<section class="panel"><label for="videos">归档视频</label><select id="videos"><option value="">正在加载…</option></select><label for="path">视频路径（归档区内）</label><input id="path" placeholder="/archive/RecentClips/…/…-front.mp4"><button id="run">开始解析</button><button id="download" disabled>导出 JSON</button><button onclick="window.print()">打印报告</button><p id="state" role="status" aria-live="polite">等待选择视频</p></section>
+<section class="panel"><h2>解析过程</h2><pre id="logs">运行后显示每个阶段的统计和结论。</pre></section><section class="panel"><h2>车辆字段</h2><p>present 表示字段在多少条采样中明确出现。null 表示未读到；不能据此认定油门为零或刹车未踩。</p><table><thead><tr><th>字段</th><th>present</th><th>最小值</th><th>最大值</th></tr></thead><tbody id="fields"></tbody></table><details><summary>Protobuf 字段、原始字节及解码样本</summary><pre id="raw"></pre></details></section></main>
+<script>
+const $=id=>document.getElementById(id);let report=null;
+$('videos').onchange=()=>{$('path').value=$('videos').value};
+async function load(){try{const r=await fetch('/api/events');if(!r.ok)throw Error('HTTP '+r.status);const data=await r.json();$('videos').replaceChildren(new Option('请选择视频',''));for(const [cat,events] of Object.entries(data))for(const ev of events)for(const v of ev.videos||[]){const path=v.url.replace('/media/','/archive/');$('videos').add(new Option(cat+' / '+ev.name+' / '+v.f,path))}const p=new URLSearchParams(location.search).get('path');if(p)$('path').value=p}catch(e){$('state').textContent='视频列表加载失败：'+e.message;$('videos').replaceChildren(new Option('可在下方手动填写路径',''))}}
+$('run').onclick=async()=>{if(!$('path').value.trim()){$('state').textContent='请先选择视频或填写路径';return}report=null;$('download').disabled=true;$('run').disabled=true;$('fields').replaceChildren();$('raw').textContent='';$('logs').textContent='正在读取 MP4、扫描 SEI 并解码，完成后显示报告…';$('state').textContent='解析中，请稍候';try{const r=await fetch('/api/telemetry/diagnose?path='+encodeURIComponent($('path').value.trim()));const data=await r.json();if(!r.ok)throw Error(data.error||'HTTP '+r.status);report=data;$('logs').textContent=data.logs.join('\n')+(data.error?'\n错误：'+data.error:'');$('state').textContent='版本 '+data.version+' · '+data.status+' · '+data.elapsed_ms+' ms';for(const [key,val] of Object.entries(data.field_summary||{})){const tr=document.createElement('tr');for(const v of [key,val.present,val.min,val.max]){const td=document.createElement('td');td.textContent=v===null?'null':String(v);tr.append(td)}$('fields').append(tr)}$('raw').textContent=JSON.stringify({parser_sha256:data.parser_sha256,trace:data.trace,sample_fields:data.sample_fields,sample_examples:data.sample_examples},null,2);$('download').disabled=false}catch(e){$('state').textContent='诊断失败：'+e.message;$('logs').textContent='未生成报告。'}finally{$('run').disabled=false}};
+$('download').onclick=()=>{if(!report)return;const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='sei-diagnostic-'+Date.now()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};load();
+</script></html>'''
+
+SEI_DIAG_LOCK = threading.Lock()
+
+
+def diagnose_telemetry(fp):
+    """Run the uploader's parser without cache, retaining bounded diagnostic detail."""
+    started = time.monotonic()
+    with open(__file__, "rb") as source:
+        parser_hash = hashlib.sha256(source.read()).hexdigest()
+    report = {"version": APP_VERSION, "parser_sha256": parser_hash,
+              "file": fp, "size_bytes": os.path.getsize(fp), "stride": 1, "trace": {}, "logs": []}
+    trace = report["trace"]
+    try:
+        tel = parse_telemetry(fp, stride=1, missing_ap_unknown=True, trace=trace)
+        frames = tel["frames"] if tel else []
+        report["status"] = ("available" if any(f[7] is not None for f in frames) else "no_ap") if frames else "no_sei"
+        report["samples"] = len(frames)
+        names = ["offset_s", "gear", "speed_kmh", "accelerator_pct", "steering_deg", "brake_pressed",
+                 "turn_signal", "ap_raw_state", "latitude", "longitude", "heading", "accel_x", "accel_y", "accel_z"]
+        report["sample_fields"] = names
+        report["sample_examples"] = frames[:10]
+        report["field_summary"] = {}
+        for i, name in enumerate(names[1:], 1):
+            values = [f[i] for f in frames if f[i] is not None]
+            report["field_summary"][name] = {"present": len(values), "min": min(values) if values else None,
+                                             "max": max(values) if values else None}
+    except Exception as exc:
+        report.update(status="parse_error", error=type(exc).__name__ + ": " + str(exc))
+    report["elapsed_ms"] = round((time.monotonic() - started) * 1000, 1)
+    report["logs"] = [
+        "1. 读取文件：%s（%d bytes）" % (fp, report["size_bytes"]),
+        "2. MP4 moov：%s；H.264 avcC 轨道：%s" % (trace.get("moov_found", False), trace.get("h264_track_found", False)),
+        "3. 帧索引：%s / %s；扫描上限：%s；时长：%s 秒" % (trace.get("indexed_samples", 0), trace.get("total_samples", "?"), trace.get("sample_limit", 4000), trace.get("duration_s", "?")),
+        "4. 已扫描帧：%s；NAL：%s；SEI NAL：%s；无效 NAL 长度：%s" % tuple(trace.get(k, 0) for k in ("scanned_samples", "nal_units", "sei_units", "invalid_nal_lengths")),
+        "5. 特斯拉标记命中：%s；Protobuf 解码成功：%s" % (trace.get("tesla_markers", 0), trace.get("decoded_messages", 0)),
+        "6. 结果：%s；采样：%s；耗时：%s ms" % (report["status"], report.get("samples", 0), report["elapsed_ms"]),
+        "说明：no_sei 表示当前解析器未提取到遥测，不等于文件必然没有 SEI。缺失字段显示 null，不代表实测为零。",
+    ]
+    return report
 
 
 def telemetry_cached(fp):
@@ -4860,6 +4939,21 @@ class Handler(BaseHTTPRequestHandler):
                 os.unlink(fp)
             except OSError:
                 pass
+        elif path == "/sei-diagnostics":
+            self._send(200, SEI_DIAGNOSTICS_HTML.encode())
+        elif path == "/api/telemetry/diagnose":
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            fp = safe_archive_path(q.get("path", [""])[0])
+            if not fp or not fp.lower().endswith(".mp4"):
+                self._json({"error": "请选择归档区内的 MP4 文件"}, 404)
+                return
+            if not SEI_DIAG_LOCK.acquire(blocking=False):
+                self._json({"error": "已有诊断正在运行，请稍后重试"}, 409)
+                return
+            try:
+                self._json(diagnose_telemetry(fp))
+            finally:
+                SEI_DIAG_LOCK.release()
         elif path == "/api/events":
             self._json(list_events())
         elif path == "/api/telemetry":

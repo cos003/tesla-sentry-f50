@@ -1,15 +1,14 @@
 {
-  "version": "2.5.0",
+  "version": "2.5.1",
   "date": "2026-11-08",
   "notes": [
-    "新增查看器与云上传器整包 OTA、校验和及整组回滚",
-    "新增断电后开机恢复，保留设备凭据与补传队列",
-    "新增逐采样遥测上传，需配套麦特云 0024 迁移"
+    "新增 SEI 解析诊断页面，展示帧扫描、标记命中、Protobuf 字段、耗时并导出报告",
+    "上传油门和刹车状态，保留字段缺失状态，需配套云端字段校验更新"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "016fccaa45499f10e8bfa74ec09fef002e4c4a091a7932bfb0cda148d1b46286",
-    "sentry-cloud-sync.py": "2e2febc824bd31f5b42f565f92a794b6b022aca1439db8374be467b88c06165b",
+    "sentry-viewer.py": "f45a1eaf1a2d8f7a02748a0ded07eea40fe54b2a793f65a0a7f2b66236b4a423",
+    "sentry-cloud-sync.py": "4339834d27319f3aa2d59bb6f677cf647d9e78158c9c57abba04e928426175f0",
     "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
     "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
   }

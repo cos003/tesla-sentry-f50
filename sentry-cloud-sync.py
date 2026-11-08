@@ -20,16 +20,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 TELEMETRY_FIELDS = ['offset_ms', 'gear', 'speed_kmh', 'steering_deg', 'turn_signal',
-                    'accel_x_mps2', 'accel_y_mps2', 'accel_z_mps2', 'ap_raw_state']
+                    'accel_x_mps2', 'accel_y_mps2', 'accel_z_mps2', 'ap_raw_state', 'accelerator_pct', 'brake_pressed']
 
 
 def telemetry_samples(frames):
     return {'fields': TELEMETRY_FIELDS, 'samples': [
         [round(f[0] * 1000), f[1], f[2], f[4],
          {0: 'off', 1: 'left', 2: 'right', 3: 'both'}.get(f[6]),
-         f[11], f[12], f[13], f[7]] for f in frames]}
+         f[11], f[12], f[13], f[7], f[3], (None if f[5] is None else bool(f[5]))] for f in frames]}
 STAMP = re.compile(r'^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$', re.I)
 CATS = ('RecentClips', 'SavedClips', 'SentryClips')
 MAX_PENDING = 10000
@@ -176,7 +176,7 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
                     if isinstance(raw, dict):
                         event = {k: raw[k] for k in ('timestamp', 'city', 'street', 'reason')
                                  if isinstance(raw.get(k), str) and len(raw[k]) <= 256}
-            signature = digest(canonical([before, event, 'telemetry-v1']))
+            signature = digest(canonical([before, event, 'telemetry-v2']))
             row = db.execute('SELECT signature,revision,pending FROM clips WHERE clip_id=?', (clip_id,)).fetchone()
             if row and (row[0] == signature or row[2]):
                 continue  # Never overwrite an unacknowledged revision.

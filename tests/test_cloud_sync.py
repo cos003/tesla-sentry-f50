@@ -38,6 +38,17 @@ class CloudTest(unittest.TestCase):
     def collect(self, **kwargs):
         return sync.collect(self.db,self.archive,ROOT/'sentry-viewer.py',480,extractor=lambda *_:self.tel,**kwargs)
 
+    def test_pedal_samples(self):
+        f = frame(.1, 1)
+        f[3], f[5] = 37, 1
+        data = sync.telemetry_samples([f])
+        self.assertEqual(data['fields'][-2:], ['accelerator_pct', 'brake_pressed'])
+        self.assertEqual(data['samples'][0][-2:], [37, True])
+        f[3], f[5] = 0, 0
+        self.assertEqual(sync.telemetry_samples([f])['samples'][0][-2:], [0, False])
+        f[3], f[5] = None, None
+        self.assertEqual(sync.telemetry_samples([f])['samples'][0][-2:], [None, None])
+
     def test_only_observed_ranges_are_covered(self):
         result = sync.segments([frame(0,1),frame(.1,1),frame(.2,None),frame(1.5,2),frame(1.6,2)],2000)
         self.assertEqual(result,[{'start_offset_ms':0,'end_offset_ms':200,'raw_state':1},
