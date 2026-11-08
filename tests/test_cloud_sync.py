@@ -73,6 +73,30 @@ class CloudTest(unittest.TestCase):
         self.assertEqual(seen, ['SavedClips'])
         self.assertEqual(self.collect(clock=lambda:1767225600+86400)['queued'], 0)
 
+    def test_only_front_camera_is_parsed_without_fallback(self):
+        for camera in ('back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'):
+            path = self.video.with_name(self.video.name.replace('front', camera))
+            path.write_bytes(b'fixture')
+            os.utime(path, (1767225600,)*2)
+        for result in (self.tel, {'duration':2, 'frames':[]}, ValueError('bad front')):
+            with self.subTest(result=result):
+                self.db.execute('DELETE FROM clips')
+                self.db.execute('DELETE FROM failures')
+                self.db.commit()
+                extractor = mock.Mock(side_effect=result) if isinstance(result, Exception) else mock.Mock(return_value=result)
+                sync.collect(self.db, self.archive, ROOT/'sentry-viewer.py', 480,
+                             extractor=extractor, clock=lambda:1767225660)
+                self.assertEqual(extractor.call_count, 1)
+                self.assertEqual(extractor.call_args.args[1], self.video)
+        self.video.unlink()
+        self.db.execute('DELETE FROM failures')
+        self.db.commit()
+        extractor = mock.Mock()
+        stats = sync.collect(self.db, self.archive, ROOT/'sentry-viewer.py', 480,
+                             extractor=extractor, clock=lambda:1767225660)
+        extractor.assert_not_called()
+        self.assertEqual(stats['failed'], 1)
+
     def test_pedal_samples(self):
         f = frame(.1, 1)
         f[3], f[5] = 37, 1

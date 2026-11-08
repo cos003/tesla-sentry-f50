@@ -1,14 +1,14 @@
 {
-  "version": "2.5.4",
+  "version": "2.5.5",
   "date": "2026-11-08",
   "notes": [
-    "哨兵录像不扫描遥测；手动保存录像始终扫描，不受5分钟限制",
-    "最近录像仍只解析最近5分钟，解析后立即上传"
+    "同一时间戳仅解析前摄像头，取消其他5路摄像头回退解析",
+    "保留哨兵跳过、手动保存全量扫描及解析后立即上传规则"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "8354142b5ed26a45f3a3017d87afcb1d42dd676b577311f4699710a9b66cc6b6",
-    "sentry-cloud-sync.py": "26d225367119cf5aca26a7b36082abb4a236fbc8b9d89a6eff3dec82f5500363",
+    "sentry-viewer.py": "12cb38781914a47ee9e759bfc703947453c4314ca9b83f7f25258b5681b7127e",
+    "sentry-cloud-sync.py": "7d5fd80a8de97ff57f8729d5d897e95e675052424aad54497fb3a660c517fd52",
     "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
     "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
   }
