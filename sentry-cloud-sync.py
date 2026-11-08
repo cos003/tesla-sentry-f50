@@ -144,9 +144,9 @@ def extract(viewer, path):
     return json.loads(result.stdout)
 
 
-def discover(archive):
+def discover(archive, categories=CATS):
     root = Path(archive).resolve()
-    for cat in CATS:
+    for cat in categories:
         base = root / cat
         if not base.is_dir() or base.is_symlink():
             continue
@@ -172,14 +172,14 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
         stats['backpressure'] = True
         return stats
     processed = 0
-    for clip_id, stamp, files in discover(archive):
+    for clip_id, stamp, files in discover(archive, ('RecentClips', 'SavedClips')):
         if processed >= budget:
             break
         try:
             parsed = dt.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S')
             recorded_at = parsed.replace(tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
             # Use recording time, not mtime: copying an old video must not trigger parsing.
-            if not 0 <= clock() - recorded_at <= PARSE_WINDOW_SECONDS:
+            if files[0].parents[1].name == 'RecentClips' and not 0 <= clock() - recorded_at <= PARSE_WINDOW_SECONDS:
                 continue
             before = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
             if any(clock() - p.stat().st_mtime < 5 for p in files):

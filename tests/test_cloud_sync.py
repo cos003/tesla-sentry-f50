@@ -50,6 +50,29 @@ class CloudTest(unittest.TestCase):
                 self.assertEqual(result['queued'], expected)
                 self.assertEqual(extractor.call_count, expected)
 
+    def test_sentry_is_not_scanned_but_old_saved_clips_are(self):
+        for category in ('SentryClips', 'SavedClips'):
+            folder = self.archive/category/self.video.parent.name
+            folder.mkdir(parents=True)
+            video = folder/self.video.name
+            video.write_bytes(b'fixture')
+            os.utime(video, (1767225600,)*2)
+        seen = []
+        def extract(viewer, path):
+            seen.append(path.parents[1].name)
+            return self.tel
+        original_iterdir = Path.iterdir
+        def iterdir(path):
+            if path.name == 'SentryClips':
+                raise AssertionError('sentry scanned')
+            return original_iterdir(path)
+        with mock.patch.object(Path, 'iterdir', iterdir):
+            result = sync.collect(self.db, self.archive, ROOT/'sentry-viewer.py', 480,
+                                  extractor=extract, clock=lambda:1767225600+86400)
+        self.assertEqual(result['queued'], 1)
+        self.assertEqual(seen, ['SavedClips'])
+        self.assertEqual(self.collect(clock=lambda:1767225600+86400)['queued'], 0)
+
     def test_pedal_samples(self):
         f = frame(.1, 1)
         f[3], f[5] = 37, 1
