@@ -23,9 +23,10 @@ class StatusTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name)
         self.archive = self.path / 'archive'
-        folder = self.archive / 'SavedClips' / '2026-11-08_13-54-09'
+        stamp = sync.dt.datetime.now(sync.dt.timezone(sync.dt.timedelta(hours=8))).strftime('%Y-%m-%d_%H-%M-%S')
+        folder = self.archive / 'SavedClips' / stamp
         folder.mkdir(parents=True)
-        self.video = folder / '2026-11-08_13-53-10-front.mp4'
+        self.video = folder / (stamp + '-front.mp4')
         self.video.write_bytes(b'fixture')
         os.utime(self.video, (time.time()-60,)*2)
         self.dbpath = self.path / 'queue.sqlite'

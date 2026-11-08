@@ -34,6 +34,7 @@ STAMP = re.compile(r'^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$', re.I)
 CATS = ('RecentClips', 'SavedClips', 'SentryClips')
 MAX_PENDING = 10000
 MAX_BYTES = 64 * 1024 * 1024
+PARSE_WINDOW_SECONDS = 300
 
 
 class UploadDeferred(Exception):
@@ -175,6 +176,11 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
         if processed >= budget:
             break
         try:
+            parsed = dt.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S')
+            recorded_at = parsed.replace(tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
+            # Use recording time, not mtime: copying an old video must not trigger parsing.
+            if not 0 <= clock() - recorded_at <= PARSE_WINDOW_SECONDS:
+                continue
             before = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
             if any(clock() - p.stat().st_mtime < 5 for p in files):
                 continue
@@ -213,8 +219,7 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
             duration = round(tel['duration'] * 1000)
             if not 1 <= duration <= 600000:
                 raise ValueError('invalid duration')
-            parsed = dt.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S')
-            start = int(parsed.replace(tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp() * 1000)
+            start = int(recorded_at * 1000)
             ap = segments(tel.get('frames', []), duration)
             payload = dict(clip_id=clip_id, revision=row[1] + 1 if row else 1, started_at_ms=start,
                            duration_ms=duration, utc_offset_minutes=offset,
@@ -351,13 +356,16 @@ def main(argv=None):
             db.execute("INSERT OR REPLACE INTO state VALUES ('device_identity',?)", (identity,))
         retry, last_heartbeat, last_prune, next_upload, previous_error = 5, 0, 0, 0, ''
         while True:
-            stats = collect(db, args.archive, args.viewer, offset)
+            # Yield after each clip so extraction never delays its upload behind other videos.
+            stats = collect(db, args.archive, args.viewer, offset, budget=1)
             error, delay = '', 10
             try:
                 if time.time() < next_upload:
                     # Keep extracting every cycle while network requests are backed off.
                     raise UploadDeferred(previous_error)
                 sent = upload(db, config)
+                while sent and db.execute('SELECT 1 FROM clips WHERE pending=1 LIMIT 1').fetchone():
+                    sent += upload(db, config)
                 if time.time() - last_heartbeat > 300:
                     pending = db.execute('SELECT count(*) FROM clips WHERE pending=1').fetchone()[0]
                     post(config['server'], '/api/sentry/heartbeat', config['device_token'],

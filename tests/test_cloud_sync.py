@@ -29,14 +29,26 @@ class CloudTest(unittest.TestCase):
         folder.mkdir(parents=True)
         self.video = folder / '2026-01-01_08-00-00-front.mp4'
         self.video.write_bytes(b'fixture')
-        os.utime(self.video, (time.time()-60, time.time()-60))
+        os.utime(self.video, (1767225600, 1767225600))
         self.db_path = self.root / 'queue.sqlite'
         self.db = sync.open_queue(self.db_path)
         self.addCleanup(lambda: self.db.close())
         self.tel = {'duration': 2, 'frames': [frame(0,1),frame(.1,1),frame(.2,2),frame(.3,2)]}
 
     def collect(self, **kwargs):
+        kwargs.setdefault('clock', lambda: 1767225660)
         return sync.collect(self.db,self.archive,ROOT/'sentry-viewer.py',480,extractor=lambda *_:self.tel,**kwargs)
+
+    def test_recording_age_limits_parsing_even_when_mtime_is_recent(self):
+        for age, expected in ((300, 1), (301, 0), (-1, 0)):
+            with self.subTest(age=age):
+                extractor = mock.Mock(return_value=self.tel)
+                self.db.execute('DELETE FROM clips')
+                self.db.commit()
+                result = sync.collect(self.db, self.archive, ROOT/'sentry-viewer.py', 480,
+                                      extractor=extractor, clock=lambda: 1767225600 + age)
+                self.assertEqual(result['queued'], expected)
+                self.assertEqual(extractor.call_count, expected)
 
     def test_pedal_samples(self):
         f = frame(.1, 1)
@@ -56,7 +68,7 @@ class CloudTest(unittest.TestCase):
 
     def test_grouping_timezone_and_incremental_discovery(self):
         rear=self.video.with_name(self.video.name.replace('front','back'))
-        rear.write_bytes(b'fixture'); os.utime(rear,(time.time()-60,)*2)
+        rear.write_bytes(b'fixture'); os.utime(rear,(1767225600,)*2)
         self.assertEqual(self.collect()['queued'],1)
         self.assertEqual(self.collect()['queued'],0)
         payload=json.loads(self.db.execute('SELECT payload FROM clips').fetchone()[0])
@@ -73,7 +85,7 @@ class CloudTest(unittest.TestCase):
         config={'server':'https://cloud.test','device_token':'x'*43}
         with self.assertRaises(OSError): sync.upload(self.db,config,sender=offline)
         self.video.write_bytes(b'changed file')
-        os.utime(self.video,(time.time()-60,)*2)
+        os.utime(self.video,(1767225600,)*2)
         self.assertEqual(self.collect()['queued'],0)
         self.db.close(); self.db=sync.open_queue(self.db_path)
         def ack(server,path,token,body):
@@ -104,7 +116,7 @@ class CloudTest(unittest.TestCase):
     def test_changing_file_is_not_queued_and_failure_is_retried_later(self):
         def changing(*args):
             self.video.write_bytes(b'changed'); return self.tel
-        result=sync.collect(self.db,self.archive,ROOT/'sentry-viewer.py',480,extractor=changing)
+        result=sync.collect(self.db,self.archive,ROOT/'sentry-viewer.py',480,extractor=changing,clock=lambda:1767225660)
         self.assertEqual(result['failed'],1)
         self.assertEqual(self.db.execute('SELECT count(*) FROM clips').fetchone()[0],0)
 
@@ -128,6 +140,30 @@ class CloudTest(unittest.TestCase):
                            '--archive',str(self.archive)])
             self.assertEqual(collect.call_count,3)
             self.assertEqual(upload.call_count,1)
+
+    def test_run_uploads_after_one_clip_and_drains_existing_queue(self):
+        config = self.root/'cloud.json'
+        sync.private_json(config, {'server':'https://cloud.test','device_id':'device_one',
+                                  'device_token':'a'*43,'utc_offset_minutes':480})
+        events = []
+        def collect(*args, **kwargs):
+            self.assertEqual(kwargs['budget'], 1)
+            events.append('parse')
+            return {'failed':0, 'backpressure':False}
+        def upload(db, config):
+            events.append('upload')
+            if events.count('upload') == 2:
+                db.execute('UPDATE clips SET pending=0')
+                db.commit()
+            return 1
+        self.collect()
+        self.db.close()
+        with mock.patch.object(sync, 'collect', side_effect=collect), \
+             mock.patch.object(sync, 'upload', side_effect=upload), \
+             mock.patch.object(sync, 'post', return_value={}):
+            self.assertEqual(sync.main(['run','--once','--config',str(config),
+                                        '--state',str(self.db_path),'--archive',str(self.archive)]), 0)
+        self.assertEqual(events, ['parse','upload','upload'])
 
 
 class ExtractorTest(unittest.TestCase):
