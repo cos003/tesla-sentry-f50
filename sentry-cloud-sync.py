@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '1.2.0'
+VERSION = '1.3.0'
 TELEMETRY_FIELDS = ['offset_ms', 'gear', 'speed_kmh', 'steering_deg', 'turn_signal',
                     'accel_x_mps2', 'accel_y_mps2', 'accel_z_mps2', 'ap_raw_state', 'accelerator_pct', 'brake_pressed']
 
@@ -101,10 +101,20 @@ def open_queue(path):
         clip_id TEXT PRIMARY KEY, signature TEXT NOT NULL, revision INTEGER NOT NULL,
         payload TEXT NOT NULL, pending INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS progress (
+        clip_id TEXT PRIMARY KEY, phase TEXT NOT NULL, updated_at REAL NOT NULL,
+        source TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT ''
+      );
       CREATE TABLE IF NOT EXISTS failures (clip_id TEXT PRIMARY KEY, retry_at REAL NOT NULL);
       CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     ''')
     return db
+
+
+def progress(db, clip_id, phase, source='', detail='', clock=time.time):
+    with db:
+        db.execute("INSERT INTO progress VALUES (?,?,?,?,?) ON CONFLICT(clip_id) DO UPDATE SET phase=excluded.phase, updated_at=excluded.updated_at, source=CASE WHEN excluded.source='' THEN progress.source ELSE excluded.source END, detail=excluded.detail",
+                   (clip_id, phase, clock(), source, detail))
 
 
 def segments(frames, duration_ms):
@@ -187,6 +197,7 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
             tel = None
             for path in files:
                 try:
+                    progress(db, clip_id, 'parsing', path.name, clock=clock)
                     candidate = extractor(viewer, path)
                     if tel is None or candidate.get('frames'):
                         tel = candidate
@@ -211,6 +222,7 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
                            ap_segments=ap, event=event, telemetry=telemetry_samples(tel.get('frames', [])))
             encoded = canonical(payload)
             if pending + 1 > MAX_PENDING or size + len(encoded) > MAX_BYTES:
+                progress(db, clip_id, 'waiting', detail='backpressure', clock=clock)
                 stats['backpressure'] = True
                 break
             with db:
@@ -219,10 +231,12 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
                 db.execute('DELETE FROM failures WHERE clip_id=?', (clip_id,))
             pending += 1
             size += len(encoded)
+            progress(db, clip_id, 'queued', detail=payload['telemetry_status'], clock=clock)
             stats['queued'] += 1
-        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
+        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as exc:
             with db:
                 db.execute('INSERT OR REPLACE INTO failures VALUES (?,?)', (clip_id, clock() + 300))
+            progress(db, clip_id, 'parse_failed', detail=type(exc).__name__, clock=clock)
             stats['failed'] += 1
     return stats
 
@@ -236,6 +250,10 @@ def prune(db, archive):
         for (clip_id,) in db.execute('SELECT clip_id FROM failures').fetchall():
             if clip_id not in alive:
                 db.execute('DELETE FROM failures WHERE clip_id=?', (clip_id,))
+
+        for (clip_id,) in db.execute('SELECT clip_id FROM progress WHERE updated_at < ?', (time.time() - 7 * 86400,)).fetchall():
+            if clip_id not in alive and not db.execute('SELECT 1 FROM clips WHERE clip_id=?', (clip_id,)).fetchone():
+                db.execute('DELETE FROM progress WHERE clip_id=?', (clip_id,))
 
 
 def upload(db, config, sender=None):
@@ -253,14 +271,25 @@ def upload(db, config, sender=None):
     clips = [json.loads(r[2]) for r in rows]
     # Payload determines batch ID, so retries across process restarts use the same key.
     batch_id = digest(canonical(clips))
-    result = sender(config['server'], '/api/sentry/ingest', config['device_token'],
-                    dict(schema_version=1, batch_id=batch_id, clips=clips))
-    expected = {(r[0], r[1]) for r in rows}
-    accepted = {(r['clip_id'], r['revision']) for r in result.get('accepted', [])}
-    if result.get('batch_id') != batch_id or accepted != expected:
-        raise ValueError('incomplete acknowledgement')
+    for row in rows:
+        progress(db, row[0], 'uploading')
+    try:
+        result = sender(config['server'], '/api/sentry/ingest', config['device_token'],
+                        dict(schema_version=1, batch_id=batch_id, clips=clips))
+        expected = {(r[0], r[1]) for r in rows}
+        accepted = {(r['clip_id'], r['revision']) for r in result.get('accepted', [])}
+        if result.get('batch_id') != batch_id or accepted != expected:
+            raise ValueError('incomplete acknowledgement')
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        detail = 'HTTP_%d' % exc.code if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+        for row in rows:
+            progress(db, row[0], 'upload_failed', detail=detail)
+        raise
     with db:
-        db.executemany("UPDATE clips SET pending=0,payload='' WHERE clip_id=? AND revision=?", sorted(expected))
+        db.executemany("UPDATE clips SET pending=0,payload='',updated_at=? WHERE clip_id=? AND revision=?",
+                       [(time.time(), clip_id, revision) for clip_id, revision in sorted(expected)])
+    for row in rows:
+        progress(db, row[0], 'uploaded')
     return len(rows)
 
 
