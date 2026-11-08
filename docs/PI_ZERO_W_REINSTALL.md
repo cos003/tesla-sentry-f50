@@ -9,7 +9,7 @@
 系统首次启动并连上 Wi-Fi 后，在 Pi 上执行：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/cos003/tesla-sentry-f50/main/scripts/bootstrap-pi-zero-w-v2.5.3.sh -o ~/tsf-bootstrap.sh
+curl -fsSL https://cdn.jsdelivr.net/gh/cos003/tesla-sentry-f50@main/scripts/bootstrap-pi-zero-w-v2.5.3.sh -o ~/tsf-bootstrap.sh
 sudo sh ~/tsf-bootstrap.sh
 ```
 
@@ -17,6 +17,7 @@ sudo sh ~/tsf-bootstrap.sh
 `sudo sh ~/tsf-bootstrap.sh`。脚本会创建开机 Gadget 初始化服务、下载并固定
 `bdc96d8`（v2.5.3）、运行兼容性检查、创建 exFAT 虚拟盘及 `TeslaCam` 目录、
 安装项目并检查版本。它不会覆盖已经存在的 `teslacam.img` 和 `auth.conf`。
+若 `git clone` 失败，会从镜像下载固定版本源码包并校验 SHA256。
 
 查看状态：
 

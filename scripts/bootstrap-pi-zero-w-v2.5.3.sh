@@ -7,6 +7,7 @@ REPO=https://github.com/cos003/tesla-sentry-f50.git
 COMMIT=bdc96d8
 SOURCE=/opt/tesla-sentry-source-v2.5.3
 GADGET=/sys/kernel/config/usb_gadget/tesla
+ARCHIVE_HASH=255306f0335dc9681fa720803f19b60ee3bfbb70819486aa310bd5e6808b454e
 
 fail() { echo "错误：$*" >&2; exit 1; }
 note() { echo "==> $*"; }
@@ -21,7 +22,7 @@ command -v apt-get >/dev/null || fail '需要 apt-get'
 
 note '安装系统依赖'
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 exfatprogs dosfstools util-linux
+DEBIAN_FRONTEND=noninteractive apt-get install -y git curl ca-certificates python3 exfatprogs dosfstools util-linux
 
 BOOT_CONFIG=/boot/firmware/config.txt
 [ -f "$BOOT_CONFIG" ] || BOOT_CONFIG=/boot/config.txt
@@ -78,12 +79,37 @@ systemctl enable --now tesla-gadget-init.service
 note '下载并固定项目 v2.5.3'
 if [ -d "$SOURCE/.git" ]; then
     git -C "$SOURCE" fetch origin "$COMMIT"
+    git -C "$SOURCE" checkout --detach "$COMMIT"
+elif [ -f "$SOURCE/.tsf-source-sha256" ]; then
+    [ "$(cat "$SOURCE/.tsf-source-sha256")" = "$ARCHIVE_HASH" ] || fail '已有源码包标记与预期不符'
+elif [ ! -e "$SOURCE" ]; then
+    STAGE=$(mktemp -d /opt/tsf-source-XXXXXX)
+    if timeout 40 git clone "$REPO" "$STAGE/repo" && git -C "$STAGE/repo" checkout --detach "$COMMIT"; then
+        mv "$STAGE/repo" "$SOURCE"
+    else
+        note 'GitHub 克隆失败，尝试镜像中的固定版本源码包'
+        ARCHIVE="$STAGE/source.tar.gz"
+        for URL in \
+            'https://cdn.jsdelivr.net/gh/cos003/tesla-sentry-f50@main/dist/tesla-sentry-f50-v2.5.3.tar.gz' \
+            'https://ghfast.top/https://raw.githubusercontent.com/cos003/tesla-sentry-f50/main/dist/tesla-sentry-f50-v2.5.3.tar.gz' \
+            'https://raw.githubusercontent.com/cos003/tesla-sentry-f50/main/dist/tesla-sentry-f50-v2.5.3.tar.gz'; do
+            if curl -fLSs --connect-timeout 8 --max-time 45 "$URL" -o "$ARCHIVE" && \
+               printf '%s  %s\n' "$ARCHIVE_HASH" "$ARCHIVE" | sha256sum -c - >/dev/null; then
+                break
+            fi
+            rm -f "$ARCHIVE"
+        done
+        [ -f "$ARCHIVE" ] || fail '所有源码下载源均失败；检查 Pi 的网络和 DNS'
+        mkdir "$STAGE/source"
+        tar -xzf "$ARCHIVE" -C "$STAGE/source"
+        printf '%s\n' "$ARCHIVE_HASH" > "$STAGE/source/.tsf-source-sha256"
+        mv "$STAGE/source" "$SOURCE"
+    fi
+    rm -rf "$STAGE"
 else
     [ ! -e "$SOURCE" ] || fail "$SOURCE 已存在且不是 Git 仓库"
-    git clone "$REPO" "$SOURCE"
 fi
-git -C "$SOURCE" checkout --detach "$COMMIT"
-[ "$(git -C "$SOURCE" rev-parse --short HEAD)" = "$COMMIT" ] || fail '源码版本不匹配'
+[ "$(python3 -c 'import pathlib,re; s=pathlib.Path("/opt/tesla-sentry-source-v2.5.3/sentry-viewer.py").read_text(); print(re.search(r"^APP_VERSION = \"([^\"]+)\"",s,re.M).group(1))')" = 2.5.3 ] || fail '源码版本不匹配'
 
 # On a disconnected USB port, `not attached` is a valid gadget state.
 python3 - "$SOURCE/scripts/tesla-gadget.sh" <<'PY'
