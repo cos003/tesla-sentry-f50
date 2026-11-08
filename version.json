@@ -1,14 +1,15 @@
 {
-  "version": "2.5.2",
+  "version": "2.5.3",
   "date": "2026-11-08",
   "notes": [
-    "录像卡片、摄像头及片段切换按钮新增解析和上传状态，每 5 秒刷新",
-    "上传器持久记录解析中、待上传、上传成功和失败重试，保留既有队列"
+    "自动遥测仅解析最近5分钟录像，每解析一组立即上传",
+    "同步状态仅查询可见录像，分状态缓存并限制请求频率",
+    "同步状态请求超时自动恢复，显示云端确认的上传结果"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "3767057e01e8c4f864bb8bdf0aa70573ca7c3bb935ff02d44f9f243c41a2222c",
-    "sentry-cloud-sync.py": "ad78c7883dfbaed7756a3ee4100c3220de4d9044fe4139896244c26aa78d8210",
+    "sentry-viewer.py": "4b99d75647c8eac557a31eca2b3ba88d4ae3c9c432d4c4bc4091180e272a4292",
+    "sentry-cloud-sync.py": "58490db3ebfb0af1dd8cb455116e6eb0935c48fe6722aabf15a613b740363b28",
     "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
     "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
   }
