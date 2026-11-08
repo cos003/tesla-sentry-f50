@@ -10,6 +10,7 @@ import os
 import re
 import hmac
 import hashlib
+import importlib.util
 import shutil
 import struct
 import sqlite3
@@ -18,6 +19,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 import http.client
 import ssl
@@ -71,7 +73,7 @@ MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频�
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.3"
+APP_VERSION = "2.5.6"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -797,6 +799,7 @@ select.ninput { cursor:pointer; }
     <button class="stab" id="st-audio" onclick="stab('audio')">🔊 锁车语音</button>
     <button class="stab" id="st-wraps" onclick="stab('wraps')">🚙 涂装</button>
     <button class="stab" id="st-notify" onclick="stab('notify')">🔔 推送</button>
+    <button class="stab" id="st-cloud" onclick="stab('cloud')">☁ 麦特云</button>
     <button class="stab" id="st-auth" onclick="stab('auth')">🔑 账号</button>
     <button class="stab" id="st-lang" onclick="stab('lang')">🌐 语言</button>
     <button class="stab" id="st-skin" onclick="stab('skin')">🎨 网页背景</button>
@@ -886,6 +889,12 @@ select.ninput { cursor:pointer; }
     <div class="hint" style="margin-top:12px"><span>用户名</span>: <b id="pw-user">admin</b></div>
     <div class="hint">要改用户名请编辑设备上 /opt/tesla-sentry/auth.conf 的 user=</div>
     <div class="updbtns" style="margin-top:16px"><button class="mini logout" onclick="doLogout()">退出登录</button></div>
+  </div>
+  <div id="tab-cloud" style="display:none">
+    <div class="hint">在麦特云生成一次性绑定密钥，粘贴后由本机完成绑定并启动上传服务。密钥只用于这一次绑定。</div>
+    <input class="ninput" id="cloud-code" type="password" autocomplete="off" spellcheck="false" placeholder="一次性绑定密钥">
+    <div class="updbtns"><button class="mini primary" id="cloud-enroll-btn" onclick="cloudEnroll()">绑定并启动同步</button></div>
+    <div class="hint" id="cloud-msg" role="status"></div>
   </div>
   <div id="tab-update" style="display:none">
     <div class="updrow"><span class="updk">当前版本</span><b id="upd-cur">—</b></div>
@@ -2115,7 +2124,7 @@ function doLogout() {
   location.href = '/logout';
 }
 function stab(which) {
-  ['files', 'audio', 'wraps', 'notify', 'auth', 'lang', 'skin', 'update'].forEach(k => {
+  ['files', 'audio', 'wraps', 'notify', 'cloud', 'auth', 'lang', 'skin', 'update'].forEach(k => {
     const b = document.getElementById('st-' + k), t = document.getElementById('tab-' + k);
     if (b) b.classList.toggle('active', k === which);
     if (t) t.style.display = k === which ? '' : 'none';
@@ -2123,6 +2132,7 @@ function stab(which) {
   if (which === 'update') otaCheck(false);
   if (which === 'notify') ntLoad();
   if (which === 'auth') pwLoad();
+  if (which === 'cloud') cloudLoad();
   if (which === 'wraps') refreshWraps();
 }
 
@@ -2245,6 +2255,28 @@ async function ntTest() {
 function ntMediaUI() {
   const v = document.getElementById('nt-media').value === 'video';
   document.getElementById('nt-vwrap').style.display = v ? '' : 'none';
+}
+
+/* ---------- 麦特云设备绑定 ---------- */
+async function cloudLoad() {
+  const m=document.getElementById('cloud-msg'), b=document.getElementById('cloud-enroll-btn');
+  try {
+    const res=await fetch('/api/cloud/enroll',{cache:'no-store'}), j=await res.json();
+    b.disabled=!j.available||j.enrolled;
+    m.textContent=j.enrolled?(j.running?'已绑定 · 上传服务运行中':'已绑定 · 上传服务未运行，请检查服务日志'):(j.available?'尚未绑定':'绑定不可用：'+(j.reason||'请检查设备配置'));
+  } catch(e) { m.textContent='状态获取失败'; b.disabled=true; }
+}
+async function cloudEnroll() {
+  const input=document.getElementById('cloud-code'), m=document.getElementById('cloud-msg'), b=document.getElementById('cloud-enroll-btn');
+  const code=input.value.trim();
+  if(!/^[A-Za-z0-9_-]{32,128}$/.test(code)){m.textContent='密钥格式不正确';return;}
+  b.disabled=true;m.textContent='正在绑定并启动上传服务…';
+  try {
+    const res=await fetch('/api/cloud/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+    input.value='';
+    const j=await res.json();m.textContent=j.msg||'操作失败';
+    if(j.ok)await cloudLoad(); else b.disabled=false;
+  } catch(e) { input.value='';m.textContent='绑定请求失败，请检查网络和设备日志';b.disabled=false; }
 }
 
 /* ---------- 账号: 改登录密码 ---------- */
@@ -2710,6 +2742,74 @@ def list_events():
         out[cat] = events
     return out
 
+
+
+_CLOUD_ENROLL_LOCK = threading.Lock()
+
+
+def cloud_enroll_paths():
+    root = os.path.dirname(os.path.realpath(__file__))
+    return (os.path.join(root, "cloud.json"), os.path.join(root, "sentry-cloud-sync.py"),
+            os.path.join(root, "scripts", "install-cloud-sync.sh"))
+
+
+def cloud_enroll_status():
+    config, uploader, installer = cloud_enroll_paths()
+    enrolled = os.path.isfile(config)
+    available = bool(AUTH_ON and os.geteuid() == 0 and os.path.isfile(uploader)
+                     and os.path.isfile(installer) and os.path.isdir('/run/systemd/system'))
+    running = False
+    if enrolled and os.path.isdir('/run/systemd/system'):
+        try:
+            running = subprocess.run(['systemctl', 'is-active', '--quiet', 'sentry-cloud-sync.service'],
+                                     timeout=3, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return {"available": available, "enrolled": enrolled, "running": running,
+            "reason": "请启用网页登录保护并确认 Pi 上已安装 systemd 上传组件" if not available else ""}
+
+
+def cloud_enroll_once(code):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', code):
+        return 400, '密钥格式不正确'
+    config, uploader, installer = cloud_enroll_paths()
+    if not cloud_enroll_status()['available']:
+        return 503, '绑定不可用，请检查网页登录保护和上传组件'
+    if not _CLOUD_ENROLL_LOCK.acquire(blocking=False):
+        return 409, '绑定正在进行中'
+    try:
+        if os.path.exists(config):
+            return 409, '设备已绑定；如需更换设备，请先在麦特云撤销旧设备'
+        spec = importlib.util.spec_from_file_location('tsf_cloud_enroll', uploader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            result = module.post('https://www.myteslacloud.com', '/api/sentry/enroll', code,
+                                 {'name': 'Sentry Pi'})
+        except urllib.error.HTTPError as exc:
+            return 502, '麦特云拒绝绑定（HTTP %d），请检查密钥是否过期或已使用' % exc.code
+        except (OSError, ValueError, KeyError, TypeError):
+            return 502, '连接麦特云失败或响应无效，请检查网络后重试'
+        if (not isinstance(result, dict) or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', str(result.get('device_token', '')))
+                or not isinstance(result.get('device_id'), str)
+                or type(result.get('utc_offset_minutes')) is not int):
+            return 502, '麦特云返回的设备配置无效，请检查云端设备状态'
+        result['server'] = 'https://www.myteslacloud.com'
+        try:
+            module.private_json(config, result)
+        except OSError:
+            return 500, '麦特云已接受绑定，但本机保存设备配置失败；请检查磁盘与权限'
+        try:
+            proc = subprocess.run(['/bin/sh', installer, os.path.dirname(config)],
+                                  capture_output=True, timeout=90)
+        except (OSError, subprocess.TimeoutExpired):
+            return 500, '绑定已保存，但上传服务安装失败；请在 Pi 上检查安装日志'
+        if proc.returncode:
+            return 500, '绑定已保存，但上传服务安装失败；请在 Pi 上手动运行安装脚本'
+        return 200, '绑定成功，上传服务已启动'
+    finally:
+        _CLOUD_ENROLL_LOCK.release()
 
 
 def cloud_clip_status(ids):
@@ -5048,6 +5148,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(diagnose_telemetry(fp))
             finally:
                 SEI_DIAG_LOCK.release()
+        elif path == "/api/cloud/enroll":
+            if not AUTH_ON:
+                self._json({"available": False, "reason": "请先启用网页登录保护"}, 403)
+                return
+            self._json(cloud_enroll_status())
         elif path == "/api/cloud/status":
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             ids = list(dict.fromkeys(q.get("ids", [""])[0].split(',')))
@@ -5313,6 +5418,28 @@ class Handler(BaseHTTPRequestHandler):
         if not self._gate():
             return
         path = urllib.parse.unquote(self.path)
+        if path == "/api/cloud/enroll":
+            if not AUTH_ON or self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+                self._json({"ok": False, "msg": "需要网页登录保护和 JSON 请求"}, 403)
+                return
+            origin = self.headers.get('Origin', '')
+            if not origin or urllib.parse.urlsplit(origin).netloc != self.headers.get('Host'):
+                self._json({"ok": False, "msg": "请求来源不匹配"}, 403)
+                return
+            try:
+                n = int(self.headers.get('Content-Length', 0))
+                if not 1 <= n <= 512:
+                    raise ValueError('size')
+                body = json.loads(self.rfile.read(n))
+                code = body.get('code', '') if isinstance(body, dict) else ''
+                if not isinstance(code, str):
+                    raise ValueError('code')
+            except (ValueError, TypeError, json.JSONDecodeError):
+                self._json({"ok": False, "msg": "参数错误"}, 400)
+                return
+            status, msg = cloud_enroll_once(code.strip())
+            self._json({"ok": status == 200, "msg": msg}, status)
+            return
         if path == "/api/auth/pass":
             try:
                 n = int(self.headers.get("Content-Length", 0))

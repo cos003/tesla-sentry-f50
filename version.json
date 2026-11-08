@@ -1,14 +1,13 @@
 {
-  "version": "2.5.3",
+  "version": "2.5.6",
   "date": "2026-11-08",
   "notes": [
-    "自动遥测仅解析最近5分钟录像，每解析一组立即上传",
-    "同步状态仅查询可见录像，分状态缓存并限制请求频率",
-    "同步状态请求超时自动恢复，显示云端确认的上传结果"
+    "设置页新增麦特云一次性密钥绑定和上传服务启动",
+    "显示绑定与服务运行状态，保护密钥且禁止覆盖已有绑定"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "4b99d75647c8eac557a31eca2b3ba88d4ae3c9c432d4c4bc4091180e272a4292",
+    "sentry-viewer.py": "11814271ff4074c54069e7fb8846047284deb90bf37c81acc50e4feaf493c070",
     "sentry-cloud-sync.py": "58490db3ebfb0af1dd8cb455116e6eb0935c48fe6722aabf15a613b740363b28",
     "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
     "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
