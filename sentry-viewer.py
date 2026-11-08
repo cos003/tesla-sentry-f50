@@ -71,7 +71,7 @@ MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频�
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.5"
+APP_VERSION = "2.5.3"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -1404,9 +1404,8 @@ function dheadLabel(d) {
 /* Per timestamp group: cameras share one telemetry upload. */
 const syncStatusCache=new Map();
 function applySyncStatus(node,entry){node.textContent=entry.text;node.dataset.phase=entry.phase;node.title=entry.title;}
-function syncBadge(id,category=currentCat) {
+function syncBadge(id) {
   const el=document.createElement('span'); el.className='sync-badge';
-  if(category==='SentryClips'){el.textContent='哨兵录像 · 不扫描遥测';return el;}
   if(id){el.dataset.syncId=id;el.textContent='同步状态读取中';const cached=syncStatusCache.get(id);if(cached)applySyncStatus(el,cached);}
   else el.textContent='不符合扫描命名';
   return el;
@@ -1494,7 +1493,7 @@ function render(cat) {
     const statusRow=document.createElement('div');statusRow.className='sync-status-row';
     for(const group of groups){const wrap=document.createElement('span');
       if(groups.length>1){const tm=document.createElement('small');tm.textContent=(group.key.split('_')[1]||group.key).replace(/-/g,':')+' ';wrap.append(tm);}
-      wrap.append(syncBadge(group.vids[0]?.sync_id,cat));statusRow.append(wrap);}
+      wrap.append(syncBadge(group.vids[0]?.sync_id));statusRow.append(wrap);}
     card.querySelector('.meta').append(statusRow);
     card.onclick = () => openPlayer(ev);
     g.appendChild(card);

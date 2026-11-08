@@ -144,9 +144,9 @@ def extract(viewer, path):
     return json.loads(result.stdout)
 
 
-def discover(archive, categories=CATS):
+def discover(archive):
     root = Path(archive).resolve()
-    for cat in categories:
+    for cat in CATS:
         base = root / cat
         if not base.is_dir() or base.is_symlink():
             continue
@@ -160,7 +160,7 @@ def discover(archive, categories=CATS):
                     groups.setdefault(m[1], []).append(path)
             for stamp, files in sorted(groups.items(), reverse=True):
                 relative = str(folder.relative_to(root) / stamp)
-                # Keep grouping stable for shared clip IDs; only front is parsed below.
+                # Prefer front, but use another camera if it has the only usable SEI.
                 files.sort(key=lambda p: (not p.name.endswith('-front.mp4'), p.name))
                 yield digest(relative), stamp, files
 
@@ -172,22 +172,15 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
         stats['backpressure'] = True
         return stats
     processed = 0
-    for clip_id, stamp, files in discover(archive, ('RecentClips', 'SavedClips')):
+    for clip_id, stamp, files in discover(archive):
         if processed >= budget:
             break
         try:
             parsed = dt.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S')
             recorded_at = parsed.replace(tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
             # Use recording time, not mtime: copying an old video must not trigger parsing.
-            if files[0].parents[1].name == 'RecentClips' and not 0 <= clock() - recorded_at <= PARSE_WINDOW_SECONDS:
+            if not 0 <= clock() - recorded_at <= PARSE_WINDOW_SECONDS:
                 continue
-            failure = db.execute('SELECT retry_at FROM failures WHERE clip_id=?', (clip_id,)).fetchone()
-            if failure and failure[0] > clock():
-                continue
-            files = [p for p in files if p.name.lower().endswith('-front.mp4')]
-            if not files:
-                processed += 1
-                raise ValueError('front camera missing')
             before = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
             if any(clock() - p.stat().st_mtime < 5 for p in files):
                 continue
@@ -203,10 +196,23 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
             row = db.execute('SELECT signature,revision,pending FROM clips WHERE clip_id=?', (clip_id,)).fetchone()
             if row and (row[0] == signature or row[2]):
                 continue  # Never overwrite an unacknowledged revision.
+            failure = db.execute('SELECT retry_at FROM failures WHERE clip_id=?', (clip_id,)).fetchone()
+            if failure and failure[0] > clock():
+                continue
             processed += 1
-            path = files[0]
-            progress(db, clip_id, 'parsing', path.name, clock=clock)
-            tel = extractor(viewer, path)
+            tel = None
+            for path in files:
+                try:
+                    progress(db, clip_id, 'parsing', path.name, clock=clock)
+                    candidate = extractor(viewer, path)
+                    if tel is None or candidate.get('frames'):
+                        tel = candidate
+                    if candidate.get('frames'):
+                        break
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    continue
+            if tel is None:
+                raise ValueError('no complete camera file')
             after = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
             if before != after:
                 raise ValueError('file changed during extraction')
