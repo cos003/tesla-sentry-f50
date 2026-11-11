@@ -1,13 +1,12 @@
 {
-  "version": "2.5.6",
-  "date": "2026-11-08",
+  "version": "2.5.7",
+  "date": "2026-11-11",
   "notes": [
-    "设置页新增麦特云一次性密钥绑定和上传服务启动",
-    "显示绑定与服务运行状态，保护密钥且禁止覆盖已有绑定"
+    "空版本，用来确认设备能从 GitHub 完成 OTA"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "11814271ff4074c54069e7fb8846047284deb90bf37c81acc50e4feaf493c070",
+    "sentry-viewer.py": "4c546fb6f066a04c9ab01c0b9a03f057c74c5d37d899e7b422abb28498243bbf",
     "sentry-cloud-sync.py": "58490db3ebfb0af1dd8cb455116e6eb0935c48fe6722aabf15a613b740363b28",
     "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
     "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
