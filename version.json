@@ -1,14 +1,14 @@
 {
-  "version": "2.5.9",
+  "version": "2.5.10",
   "date": "2026-11-12",
   "notes": [
-    "上传失败的标签可以点击，马上重新上传",
-    "云端返回 400 时只隔开出错的片段，不再整批失败"
+    "修好队列里的采样，单条失败不再堵住后面的片段",
+    "失败时保留云端拒绝原因和采样现场"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "725c000477b48326c55e8590bf7ff5b25c0e2a17d08f48a7cb5c4a2dccd28368",
-    "sentry-cloud-sync.py": "d881c96fed7b1a80b6e879ca8bae84eefb2c806a6b2b2a7b7154c9afd3310979",
+    "sentry-viewer.py": "fe2a61bb64a3455e6add72f935b0f38be0d230f5bc75191ad01ad3f952b3053e",
+    "sentry-cloud-sync.py": "e1daa7f66ffdd053fd15ee379ddca458a7e5e9c0ed40c0b28d7f01f44da43bee",
     "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
     "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
   }
