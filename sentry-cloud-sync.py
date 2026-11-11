@@ -194,9 +194,17 @@ def open_queue(path):
         clip_id TEXT PRIMARY KEY, phase TEXT NOT NULL, updated_at REAL NOT NULL,
         source TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT ''
       );
-      CREATE TABLE IF NOT EXISTS failures (clip_id TEXT PRIMARY KEY, retry_at REAL NOT NULL);
+      CREATE TABLE IF NOT EXISTS failures (
+        clip_id TEXT PRIMARY KEY, retry_at REAL NOT NULL,
+        code TEXT NOT NULL DEFAULT '', scene TEXT NOT NULL DEFAULT ''
+      );
       CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     ''')
+    columns = {row[1] for row in db.execute('PRAGMA table_info(failures)')}
+    if 'code' not in columns:
+        db.execute("ALTER TABLE failures ADD COLUMN code TEXT NOT NULL DEFAULT ''")
+    if 'scene' not in columns:
+        db.execute("ALTER TABLE failures ADD COLUMN scene TEXT NOT NULL DEFAULT ''")
     return db
 
 
@@ -328,7 +336,8 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
             stats['queued'] += 1
         except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as exc:
             with db:
-                db.execute('INSERT OR REPLACE INTO failures VALUES (?,?)', (clip_id, clock() + 300))
+                db.execute('INSERT INTO failures (clip_id, retry_at) VALUES (?,?) ON CONFLICT(clip_id) DO UPDATE SET retry_at=excluded.retry_at',
+                           (clip_id, clock() + 300))
             progress(db, clip_id, 'parse_failed', detail=type(exc).__name__, clock=clock)
             stats['failed'] += 1
     return stats
@@ -358,25 +367,47 @@ def take_retry(db, seen):
 
 def error_detail(exc):
     if not isinstance(exc, urllib.error.HTTPError):
-        return type(exc).__name__
+        return type(exc).__name__, ''
     try:
         raw = exc.read() or b''
     except Exception:
         raw = b''
+    text = raw.decode(errors='replace')
+    code = 'HTTP_%d' % exc.code
     try:
-        name = json.loads(raw.decode()).get('error', {}).get('code')
+        name = json.loads(text).get('error', {}).get('code')
         if isinstance(name, str) and name:
-            return name
+            code = name
     except Exception:
         pass
-    return 'HTTP_%d' % exc.code
+    return code, text
 
 
-def quarantine(db, clip_id, detail):
+def clip_scene(payload, code, response):
+    try:
+        clip = json.loads(payload)
+    except (ValueError, TypeError):
+        clip = {}
+    samples = clip.get('telemetry', {}).get('samples') if isinstance(clip.get('telemetry'), dict) else []
+    if not isinstance(samples, list):
+        samples = []
+    return canonical({
+        'code': code, 'response': response[:500], 'clip_id': clip.get('clip_id'), 'revision': clip.get('revision'),
+        'started_at_ms': clip.get('started_at_ms'), 'duration_ms': clip.get('duration_ms'),
+        'utc_offset_minutes': clip.get('utc_offset_minutes'), 'telemetry_status': clip.get('telemetry_status'),
+        'event': clip.get('event'), 'sample_count': len(samples), 'samples_head': samples[:2],
+        'samples_tail': samples[-1:] if len(samples) > 2 else [],
+        'segments': (clip.get('ap_segments') or [])[:8],
+    })[:16000]
+
+
+def quarantine(db, row, code, response):
     with db:
-        db.execute('INSERT OR REPLACE INTO failures VALUES (?,?)', (clip_id, time.time() + 6 * 3600))
-    progress(db, clip_id, 'upload_failed', detail=detail)
-    print('Rejected clip %s: %s' % (clip_id, detail), flush=True)
+        db.execute('''INSERT INTO failures (clip_id, retry_at, code, scene) VALUES (?,?,?,?)
+          ON CONFLICT(clip_id) DO UPDATE SET retry_at=excluded.retry_at, code=excluded.code, scene=excluded.scene''',
+                   (row[0], time.time() + 6 * 3600, code, clip_scene(row[2], code, response)))
+    progress(db, row[0], 'upload_failed', detail=code)
+    print('Rejected clip %s: %s' % (row[0], code), flush=True)
 
 
 def commit_upload(db, rows):
@@ -428,30 +459,32 @@ def upload(db, config, sender=None):
     try:
         return deliver(rows)
     except urllib.error.HTTPError as exc:
+        code, response = error_detail(exc)
         if exc.code != 400:
             for row in rows:
-                progress(db, row[0], 'upload_failed', detail=error_detail(exc))
+                progress(db, row[0], 'upload_failed', detail=code)
             raise
         if len(rows) == 1:
-            quarantine(db, rows[0][0], error_detail(exc))
+            quarantine(db, rows[0], code, response)
             return 0
         sent = 0
         for row in rows:
             try:
                 sent += deliver([row])
             except urllib.error.HTTPError as one:
+                one_code, one_body = error_detail(one)
                 if one.code != 400:
                     for pending in rows:
-                        progress(db, pending[0], 'upload_failed', detail=error_detail(one))
+                        progress(db, pending[0], 'upload_failed', detail=one_code)
                     raise
-                quarantine(db, row[0], error_detail(one))
-            except (ValueError, OSError, KeyError, TypeError) as exc:
-                progress(db, row[0], 'upload_failed', detail=error_detail(exc))
+                quarantine(db, row, one_code, one_body)
+            except (ValueError, OSError, KeyError, TypeError) as nested:
+                progress(db, row[0], 'upload_failed', detail=error_detail(nested)[0])
                 raise
         return sent
     except (ValueError, OSError, KeyError, TypeError) as exc:
         for row in rows:
-            progress(db, row[0], 'upload_failed', detail=error_detail(exc))
+            progress(db, row[0], 'upload_failed', detail=error_detail(exc)[0])
         raise
 
 

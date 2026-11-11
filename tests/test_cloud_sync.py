@@ -88,6 +88,10 @@ class CloudTest(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT pending FROM clips WHERE clip_id=?', (good[0],)).fetchone()[0], 0)
         self.assertEqual(self.db.execute('SELECT pending FROM clips WHERE clip_id=?', (bad['clip_id'],)).fetchone()[0], 1)
         self.assertGreater(self.db.execute('SELECT retry_at FROM failures WHERE clip_id=?', (bad['clip_id'],)).fetchone()[0], time.time())
+        scene = json.loads(self.db.execute('SELECT scene FROM failures WHERE clip_id=?', (bad['clip_id'],)).fetchone()[0])
+        self.assertEqual(scene['code'], 'invalid_clip_time')
+        self.assertEqual(scene['utc_offset_minutes'], 0)
+        self.assertEqual(scene['clip_id'], bad['clip_id'])
         self.assertEqual(sync.upload(self.db, config, sender=sender), 0)
 
     def test_only_observed_ranges_are_covered(self):
