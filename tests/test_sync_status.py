@@ -58,6 +58,12 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(self.status()['phase'], 'upload_failed')
         self.assertNotIn('private', json.dumps(self.status()))
         self.assertEqual(self.db.execute('SELECT pending FROM clips').fetchone()[0], 1)
+        ok, msg = viewer.cloud_retry_uploads([self.key])
+        self.assertTrue(ok)
+        self.assertEqual(msg, '已安排重新上传')
+        self.assertEqual(self.status()['phase'], 'queued')
+        self.assertNotEqual(self.db.execute("SELECT value FROM state WHERE key='retry_requested'").fetchone()[0], '')
+        self.assertFalse(viewer.cloud_retry_uploads([self.key])[0])
         def ack(*args):
             body = args[-1]
             return {'batch_id':body['batch_id'],'accepted':[{'clip_id':r['clip_id'],'revision':r['revision']} for r in body['clips']]}

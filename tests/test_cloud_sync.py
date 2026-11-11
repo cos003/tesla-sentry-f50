@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -60,6 +61,34 @@ class CloudTest(unittest.TestCase):
         self.assertEqual(sync.telemetry_samples([f])['samples'][0][-2:], [0, False])
         f[3], f[5] = None, None
         self.assertEqual(sync.telemetry_samples([f])['samples'][0][-2:], [None, None])
+        f[3], f[5] = 150, 1
+        self.assertEqual(sync.telemetry_samples([f])['samples'][0][-2:], [None, True])
+        self.assertEqual(sync.telemetry_samples([frame(0, 1), frame(0, 1)], 1000)['samples'].__len__(), 1)
+
+    def test_rejected_clip_does_not_block_the_rest_of_the_queue(self):
+        self.collect()
+        good = self.db.execute('SELECT clip_id,revision,payload FROM clips').fetchone()
+        bad = json.loads(good[2])
+        bad['clip_id'] = 'b' * 64
+        bad['utc_offset_minutes'] = 0
+        self.db.execute('INSERT INTO clips VALUES (?,?,?,?,1,?)',
+                        (bad['clip_id'], 'sig', 1, sync.canonical(bad), time.time() + 1))
+        self.db.commit()
+        config = {'server': 'https://cloud.test', 'device_token': 'x' * 43}
+
+        def sender(server, path, token, body):
+            if any(c['utc_offset_minutes'] != 480 for c in body['clips']):
+                raise urllib.error.HTTPError(
+                    'https://cloud.test', 400, 'bad', {},
+                    io.BytesIO(b'{"ok":false,"error":{"code":"invalid_clip_time"}}'))
+            return {'batch_id': body['batch_id'],
+                    'accepted': [{'clip_id': c['clip_id'], 'revision': c['revision']} for c in body['clips']]}
+
+        self.assertEqual(sync.upload(self.db, config, sender=sender), 1)
+        self.assertEqual(self.db.execute('SELECT pending FROM clips WHERE clip_id=?', (good[0],)).fetchone()[0], 0)
+        self.assertEqual(self.db.execute('SELECT pending FROM clips WHERE clip_id=?', (bad['clip_id'],)).fetchone()[0], 1)
+        self.assertGreater(self.db.execute('SELECT retry_at FROM failures WHERE clip_id=?', (bad['clip_id'],)).fetchone()[0], time.time())
+        self.assertEqual(sync.upload(self.db, config, sender=sender), 0)
 
     def test_only_observed_ranges_are_covered(self):
         result = sync.segments([frame(0,1),frame(.1,1),frame(.2,None),frame(1.5,2),frame(1.6,2)],2000)
@@ -140,6 +169,31 @@ class CloudTest(unittest.TestCase):
                            '--archive',str(self.archive)])
             self.assertEqual(collect.call_count,3)
             self.assertEqual(upload.call_count,1)
+
+    def test_clicked_retry_uploads_during_backoff(self):
+        config = self.root / 'cloud.json'
+        sync.private_json(config, {'server': 'https://cloud.test', 'device_id': 'device_one',
+                                   'device_token': 'a' * 43, 'utc_offset_minutes': 480})
+        class StopLoop(Exception):
+            pass
+        calls = {'n': 0}
+        def sleeper(_delay):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                db = sync.sqlite3.connect(str(self.root / 'backoff.sqlite'))
+                db.execute("INSERT OR REPLACE INTO state VALUES ('retry_requested','clicked')")
+                db.commit()
+                db.close()
+            if calls['n'] == 2:
+                raise StopLoop()
+        with mock.patch.object(sync, 'collect', return_value={'failed': 0, 'backpressure': False}), \
+             mock.patch.object(sync, 'upload', side_effect=urllib.error.HTTPError(
+                 'https://cloud.test', 400, 'bad', {}, None)) as upload, \
+             mock.patch.object(sync.time, 'sleep', side_effect=sleeper):
+            with self.assertRaises(StopLoop):
+                sync.main(['run', '--config', str(config), '--state', str(self.root / 'backoff.sqlite'),
+                           '--archive', str(self.archive)])
+        self.assertEqual(upload.call_count, 2)
 
     def test_run_uploads_after_one_clip_and_drains_existing_queue(self):
         config = self.root/'cloud.json'

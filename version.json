@@ -1,13 +1,14 @@
 {
-  "version": "2.5.7",
-  "date": "2026-11-11",
+  "version": "2.5.9",
+  "date": "2026-11-12",
   "notes": [
-    "空版本，用来确认设备能从 GitHub 完成 OTA"
+    "上传失败的标签可以点击，马上重新上传",
+    "云端返回 400 时只隔开出错的片段，不再整批失败"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "4c546fb6f066a04c9ab01c0b9a03f057c74c5d37d899e7b422abb28498243bbf",
-    "sentry-cloud-sync.py": "58490db3ebfb0af1dd8cb455116e6eb0935c48fe6722aabf15a613b740363b28",
+    "sentry-viewer.py": "725c000477b48326c55e8590bf7ff5b25c0e2a17d08f48a7cb5c4a2dccd28368",
+    "sentry-cloud-sync.py": "d881c96fed7b1a80b6e879ca8bae84eefb2c806a6b2b2a7b7154c9afd3310979",
     "sentry-ota.py": "3084f50ed2f53c6db81ea48da1b7d0884ef33322b105b61385d75c4fb14058fc",
     "scripts/install-cloud-sync.sh": "de704db24fb8e2d9a03e9652ee58e3bab73f8a1ec17dadd88918438860549196"
   }

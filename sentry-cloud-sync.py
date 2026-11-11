@@ -20,16 +20,104 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '1.3.0'
+VERSION = '1.3.1'
 TELEMETRY_FIELDS = ['offset_ms', 'gear', 'speed_kmh', 'steering_deg', 'turn_signal',
                     'accel_x_mps2', 'accel_y_mps2', 'accel_z_mps2', 'ap_raw_state', 'accelerator_pct', 'brake_pressed']
+LEGACY_FIELDS = TELEMETRY_FIELDS[:9]
 
 
-def telemetry_samples(frames):
-    return {'fields': TELEMETRY_FIELDS, 'samples': [
-        [round(f[0] * 1000), f[1], f[2], f[4],
-         {0: 'off', 1: 'left', 2: 'right', 3: 'both'}.get(f[6]),
-         f[11], f[12], f[13], f[7], f[3], (None if f[5] is None else bool(f[5]))] for f in frames]}
+def finite(value, limit):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(value) > limit:
+        return None
+    return value
+
+
+def brake_value(value):
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    return bool(value)
+
+
+def telemetry_samples(frames, duration_ms=None):
+    samples, previous = [], -1
+    for f in frames:
+        if len(samples) >= 4000:
+            break
+        offset = round(f[0] * 1000)
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset <= previous or offset < 0:
+            continue
+        if duration_ms is not None and offset > duration_ms:
+            continue
+        pedal = finite(f[3], 100)
+        state = f[7]
+        samples.append([
+            offset, f[1] if f[1] in ('P', 'D', 'R', 'N') else None, finite(f[2], 10000), finite(f[4], 10000),
+            {0: 'off', 1: 'left', 2: 'right', 3: 'both'}.get(f[6]),
+            finite(f[11], 10000), finite(f[12], 10000), finite(f[13], 10000),
+            state if isinstance(state, int) and not isinstance(state, bool) and 0 <= state <= 255 else None,
+            None if pedal is None or pedal < 0 else pedal, brake_value(f[5])])
+        previous = offset
+    return {'fields': TELEMETRY_FIELDS, 'samples': samples}
+
+
+def conform_clip(clip):
+    """Make a queued clip satisfy the cloud contract without dropping the whole batch."""
+    duration = clip.get('duration_ms')
+    if isinstance(duration, bool) or not isinstance(duration, int):
+        return clip
+    telemetry = clip.get('telemetry') if isinstance(clip.get('telemetry'), dict) else None
+    rows = telemetry.get('samples') if telemetry and isinstance(telemetry.get('samples'), list) else None
+    width = 11 if (telemetry and telemetry.get('fields') == TELEMETRY_FIELDS) or (rows and isinstance(rows[0], list) and len(rows[0]) == 11) else 9
+    samples, previous = [], -1
+    for r in rows or []:
+        if len(samples) >= 4000:
+            break
+        if not isinstance(r, list) or len(r) != width:
+            continue
+        offset = r[0]
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset <= previous or offset < 0 or offset > duration:
+            continue
+        row = list(r)
+        if row[1] not in ('P', 'D', 'R', 'N'):
+            row[1] = None
+        if row[4] not in ('off', 'left', 'right', 'both'):
+            row[4] = None
+        for i in (2, 3, 5, 6, 7):
+            row[i] = finite(row[i], 10000)
+        if isinstance(row[8], bool) or not isinstance(row[8], int) or not 0 <= row[8] <= 255:
+            row[8] = None
+        if width == 11:
+            pedal = finite(row[9], 100)
+            row[9] = None if pedal is None or pedal < 0 else pedal
+            row[10] = row[10] if isinstance(row[10], bool) else None
+        previous = offset
+        samples.append(row)
+    segments, last = [], 0
+    for s in clip.get('ap_segments') or []:
+        if len(segments) >= 600 or not isinstance(s, dict):
+            continue
+        start, end, state = s.get('start_offset_ms'), s.get('end_offset_ms'), s.get('raw_state')
+        if any(isinstance(v, bool) or not isinstance(v, int) for v in (start, end, state)):
+            continue
+        if start < last or end <= start or end > duration or not 0 <= state <= 255:
+            continue
+        segments.append({'start_offset_ms': start, 'end_offset_ms': end, 'raw_state': state})
+        last = end
+    status = clip.get('telemetry_status')
+    if status not in ('available', 'no_sei', 'no_ap') or (status == 'available') != bool(segments):
+        status = 'available' if segments else ('no_ap' if samples else 'no_sei')
+    event = None
+    raw_event = clip.get('event')
+    if isinstance(raw_event, dict):
+        event = {k: raw_event[k] for k in ('timestamp', 'city', 'street', 'reason')
+                 if isinstance(raw_event.get(k), str) and len(raw_event[k]) <= 256}
+    out = dict(clip)
+    out['ap_segments'] = segments
+    out['telemetry_status'] = status
+    out['event'] = event
+    if telemetry is not None:
+        out['telemetry'] = {'fields': TELEMETRY_FIELDS if width == 11 else LEGACY_FIELDS, 'samples': samples}
+    return out
 STAMP = re.compile(r'^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$', re.I)
 CATS = ('RecentClips', 'SavedClips', 'SentryClips')
 MAX_PENDING = 10000
@@ -42,7 +130,7 @@ class UploadDeferred(Exception):
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False)
 
 
 def digest(value):
@@ -224,7 +312,7 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
             payload = dict(clip_id=clip_id, revision=row[1] + 1 if row else 1, started_at_ms=start,
                            duration_ms=duration, utc_offset_minutes=offset,
                            telemetry_status='available' if ap else ('no_ap' if tel.get('frames') else 'no_sei'),
-                           ap_segments=ap, event=event, telemetry=telemetry_samples(tel.get('frames', [])))
+                           ap_segments=ap, event=event, telemetry=telemetry_samples(tel.get('frames', []), duration))
             encoded = canonical(payload)
             if pending + 1 > MAX_PENDING or size + len(encoded) > MAX_BYTES:
                 progress(db, clip_id, 'waiting', detail='backpressure', clock=clock)
@@ -261,41 +349,110 @@ def prune(db, archive):
                 db.execute('DELETE FROM progress WHERE clip_id=?', (clip_id,))
 
 
+def take_retry(db, seen):
+    """A clicked failure writes a new token. Return it and whether this loop should upload now."""
+    row = db.execute("SELECT value FROM state WHERE key='retry_requested'").fetchone()
+    token = row[0] if row and row[0] else ''
+    return token, bool(token) and token != seen
+
+
+def error_detail(exc):
+    if not isinstance(exc, urllib.error.HTTPError):
+        return type(exc).__name__
+    try:
+        raw = exc.read() or b''
+    except Exception:
+        raw = b''
+    try:
+        name = json.loads(raw.decode()).get('error', {}).get('code')
+        if isinstance(name, str) and name:
+            return name
+    except Exception:
+        pass
+    return 'HTTP_%d' % exc.code
+
+
+def quarantine(db, clip_id, detail):
+    with db:
+        db.execute('INSERT OR REPLACE INTO failures VALUES (?,?)', (clip_id, time.time() + 6 * 3600))
+    progress(db, clip_id, 'upload_failed', detail=detail)
+    print('Rejected clip %s: %s' % (clip_id, detail), flush=True)
+
+
+def commit_upload(db, rows):
+    with db:
+        db.executemany("UPDATE clips SET pending=0,payload='',updated_at=? WHERE clip_id=? AND revision=?",
+                       [(time.time(), clip_id, revision) for clip_id, revision in rows])
+        db.executemany('DELETE FROM failures WHERE clip_id=?', [(clip_id,) for clip_id, _revision in rows])
+
+
 def upload(db, config, sender=None):
     sender = sender or post
-    rows = db.execute('SELECT clip_id,revision,payload FROM clips WHERE pending=1 ORDER BY updated_at LIMIT 10').fetchall()
+    rows = db.execute('''SELECT c.clip_id,c.revision,c.payload FROM clips c
+      LEFT JOIN failures f ON f.clip_id=c.clip_id
+      WHERE c.pending=1 AND (f.retry_at IS NULL OR f.retry_at<=?)
+      ORDER BY c.updated_at LIMIT 10''', (time.time(),)).fetchall()
     if not rows:
         return 0
     selected, size = [], 0
     for row in rows:
+        clip = conform_clip(json.loads(row[2]))
+        encoded = canonical(clip)
+        if encoded != row[2]:
+            with db:
+                db.execute('UPDATE clips SET payload=? WHERE clip_id=? AND pending=1', (encoded, row[0]))
+            row = (row[0], row[1], encoded)
         size += len(row[2])
         if selected and size > 900 * 1024:
             break
         selected.append(row)
     rows = selected
-    clips = [json.loads(r[2]) for r in rows]
-    # Payload determines batch ID, so retries across process restarts use the same key.
-    batch_id = digest(canonical(clips))
-    for row in rows:
-        progress(db, row[0], 'uploading')
-    try:
+
+    def deliver(group):
+        clips = [json.loads(r[2]) for r in group]
+        # Payload determines batch ID, so retries across process restarts use the same key.
+        batch_id = digest(canonical(clips))
+        for row in group:
+            progress(db, row[0], 'uploading')
         result = sender(config['server'], '/api/sentry/ingest', config['device_token'],
                         dict(schema_version=1, batch_id=batch_id, clips=clips))
-        expected = {(r[0], r[1]) for r in rows}
+        expected = {(r[0], r[1]) for r in group}
         accepted = {(r['clip_id'], r['revision']) for r in result.get('accepted', [])}
         if result.get('batch_id') != batch_id or accepted != expected:
             raise ValueError('incomplete acknowledgement')
-    except (ValueError, OSError, KeyError, TypeError) as exc:
-        detail = 'HTTP_%d' % exc.code if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+        commit_upload(db, [(clip_id, revision) for clip_id, revision in sorted(expected)])
+        for row in group:
+            progress(db, row[0], 'uploaded')
+        return len(group)
+
+    try:
+        return deliver(rows)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            for row in rows:
+                progress(db, row[0], 'upload_failed', detail=error_detail(exc))
+            raise
+        if len(rows) == 1:
+            quarantine(db, rows[0][0], error_detail(exc))
+            return 0
+        sent = 0
         for row in rows:
-            progress(db, row[0], 'upload_failed', detail=detail)
+            try:
+                sent += deliver([row])
+            except urllib.error.HTTPError as one:
+                if one.code != 400:
+                    for pending in rows:
+                        progress(db, pending[0], 'upload_failed', detail=error_detail(one))
+                    raise
+                quarantine(db, row[0], error_detail(one))
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                progress(db, row[0], 'upload_failed', detail=error_detail(exc))
+                raise
+        return sent
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        for row in rows:
+            progress(db, row[0], 'upload_failed', detail=error_detail(exc))
         raise
-    with db:
-        db.executemany("UPDATE clips SET pending=0,payload='',updated_at=? WHERE clip_id=? AND revision=?",
-                       [(time.time(), clip_id, revision) for clip_id, revision in sorted(expected)])
-    for row in rows:
-        progress(db, row[0], 'uploaded')
-    return len(rows)
 
 
 def main(argv=None):
@@ -355,8 +512,12 @@ def main(argv=None):
         with db:
             db.execute("INSERT OR REPLACE INTO state VALUES ('device_identity',?)", (identity,))
         retry, last_heartbeat, last_prune, next_upload, previous_error = 5, 0, 0, 0, ''
+        seen_retry, _ = take_retry(db, '')
         while True:
             # Yield after each clip so extraction never delays its upload behind other videos.
+            token, requested = take_retry(db, seen_retry)
+            if requested:
+                seen_retry, next_upload, retry, previous_error = token, 0, 5, ''
             stats = collect(db, args.archive, args.viewer, offset, budget=1)
             error, delay = '', 10
             try:

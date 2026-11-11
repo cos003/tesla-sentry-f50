@@ -73,7 +73,7 @@ MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频�
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.7"
+APP_VERSION = "2.5.9"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -635,7 +635,7 @@ html[data-theme="light"] .tab.active { background:#17191c; color:#fff; }
 .qhint { font-size:12px; color:var(--amber); flex:0 0 100%; text-align:left; display:none; }
 .empty { text-align:center; padding:80px 20px; color:var(--muted2); }
 .empty .big { font-size:44px; margin-bottom:14px; }
-.vcell .camera-sync{position:absolute;left:7px;bottom:7px;background:rgba(10,16,24,.86);pointer-events:none}.sync-status-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.sync-status-row>span{display:inline-flex;align-items:center;gap:3px}.sync-badge{display:inline-block;font-size:11px;line-height:1.5;border:1px solid #7e8a9b66;border-radius:6px;padding:2px 6px;color:#8b9aaf;background:#8190a015}.sync-badge[data-phase="uploaded"]{color:#28ad79;border-color:#28ad7970}.sync-badge[data-phase="parsing"],.sync-badge[data-phase="uploading"]{color:#438ee9;border-color:#438ee970}.sync-badge[data-phase="queued"]{color:#ba8b24;border-color:#ba8b2470}.sync-badge[data-phase="parse_failed"],.sync-badge[data-phase="upload_failed"],.sync-badge[data-phase="interrupted"]{color:#e16464;border-color:#e1646470}
+.vcell .camera-sync{position:absolute;left:7px;bottom:7px;background:rgba(10,16,24,.86);pointer-events:none}.sync-status-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.sync-status-row>span{display:inline-flex;align-items:center;gap:3px}.sync-badge{display:inline-block;font-size:11px;line-height:1.5;border:1px solid #7e8a9b66;border-radius:6px;padding:2px 6px;color:#8b9aaf;background:#8190a015}.sync-badge[data-phase="uploaded"]{color:#28ad79;border-color:#28ad7970}.sync-badge[data-phase="parsing"],.sync-badge[data-phase="uploading"]{color:#438ee9;border-color:#438ee970}.sync-badge[data-phase="queued"]{color:#ba8b24;border-color:#ba8b2470}.sync-badge[data-phase="parse_failed"],.sync-badge[data-phase="upload_failed"],.sync-badge[data-phase="interrupted"]{color:#e16464;border-color:#e1646470}.sync-badge[data-retry="1"]{cursor:pointer;pointer-events:auto}
 /* 设置面板 */
 .mask { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:200; }
 .mask.open { display:block; }
@@ -1412,7 +1412,7 @@ function dheadLabel(d) {
 
 /* Per timestamp group: cameras share one telemetry upload. */
 const syncStatusCache=new Map();
-function applySyncStatus(node,entry){node.textContent=entry.text;node.dataset.phase=entry.phase;node.title=entry.title;}
+function applySyncStatus(node,entry){node.textContent=entry.text;node.dataset.phase=entry.phase;node.title=entry.title;node.dataset.retry=entry.phase==='upload_failed'?'1':'';}
 function syncBadge(id) {
   const el=document.createElement('span'); el.className='sync-badge';
   if(id){el.dataset.syncId=id;el.textContent='同步状态读取中';const cached=syncStatusCache.get(id);if(cached)applySyncStatus(el,cached);}
@@ -1438,7 +1438,7 @@ async function refreshSyncStatus(){
     for(const node of document.querySelectorAll('[data-sync-id]')){if(!batch.includes(node.dataset.syncId))continue;
       const status=data.clips[node.dataset.syncId];
       if(!data.available){node.textContent=data.reason==='no_queue'?'同步未初始化':'同步状态不可读';node.dataset.phase='unknown';node.title='没有可用的上传队列信息，无法判断是否已上传';continue;}
-      const phase=status?.phase||'waiting';node.dataset.phase=phase;node.textContent=(labels[phase]||'同步状态未知')+((phase==='upload_failed'||phase==='parse_failed')&&status?.detail?' · '+status.detail:'');
+      const phase=status?.phase||'waiting';node.dataset.phase=phase;node.dataset.retry=phase==='upload_failed'?'1':'';node.textContent=(labels[phase]||'同步状态未知')+((phase==='upload_failed'||phase==='parse_failed')&&status?.detail?' · '+status.detail:'')+(phase==='upload_failed'?' · 点击重试':'');
       const detail=[ '同一时间戳的多路录像共用一份遥测上传',status?.source?'解析来源：'+status.source:'',status?.detail||'',status?.updated_at?'更新时间：'+new Date(status.updated_at*1000).toLocaleString():'尚未进入处理记录',data.state?.last_error?'服务最近错误：'+data.state.last_error:'',data.state?.next_upload_at> Date.now()/1000?'上传重试时间：'+new Date(data.state.next_upload_at*1000).toLocaleString():'',!data.tracking?'旧版上传器尚未记录逐片段进度':''];node.title=detail.filter(Boolean).join('\n');
     }
   }catch(e){for(const node of document.querySelectorAll('[data-sync-id]'))if(batch.includes(node.dataset.syncId)){node.textContent='同步状态获取失败';node.dataset.phase='unknown';node.title=e.message;}}
@@ -1446,6 +1446,22 @@ async function refreshSyncStatus(){
   finally{syncStatusBusy=false;}
 }
 setInterval(refreshSyncStatus,3000);
+document.addEventListener('click',async function(e){
+  const node=e.target.closest&&e.target.closest('.sync-badge[data-retry="1"]');
+  if(!node||node.dataset.busy==='1')return;
+  e.preventDefault();e.stopPropagation();
+  const id=node.dataset.syncId;if(!id)return;
+  const nodes=[...document.querySelectorAll('[data-sync-id]')].filter(n=>n.dataset.syncId===id);
+  nodes.forEach(n=>{n.dataset.busy='1';n.textContent='正在重试…';});
+  try{
+    const res=await fetch('/api/cloud/retry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[id]})});
+    const data=await res.json();
+    if(!res.ok||!data.ok)throw Error(data.msg||'重试失败');
+    nodes.forEach(n=>{n.dataset.phase='queued';n.dataset.retry='';n.textContent='已解析 · 待上传';n.title='已请求重新上传';syncStatusCache.set(id,{text:n.textContent,phase:'queued',title:n.title,checkedAt:Date.now()});});
+  }catch(err){
+    nodes.forEach(n=>{n.dataset.phase='upload_failed';n.dataset.retry='1';n.textContent='上传失败 · 点击重试';n.title=err.message;});
+  }finally{nodes.forEach(n=>{n.dataset.busy='';});}
+},true);
 
 function render(cat) {
   const g = document.getElementById('grid'), e = document.getElementById('empty');
@@ -2849,6 +2865,43 @@ def cloud_clip_status(ids):
             return {"available": True, "tracking": 'progress' in tables, "state": state, "clips": result}
     except (OSError, sqlite3.Error):
         return {"available": False, "reason": "queue_unreadable", "clips": {}}
+
+
+def cloud_retry_uploads(ids):
+    """Ask the uploader to send failed clips now. The cooldown lives in its process."""
+    path = os.environ.get("TSF_CLOUD_STATE", "/var/lib/tesla-sentry-cloud/queue.sqlite")
+    if not os.path.isfile(path):
+        return False, "同步未初始化"
+    try:
+        db = sqlite3.connect(path, timeout=5)
+        try:
+            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "clips" not in tables or "progress" not in tables or "state" not in tables:
+                return False, "上传队列还不能按片段重试"
+            now = time.time()
+            retried = []
+            for key in ids:
+                row = db.execute("SELECT pending FROM clips WHERE clip_id=?", (key,)).fetchone()
+                track = db.execute("SELECT phase FROM progress WHERE clip_id=?", (key,)).fetchone()
+                if not row or not row[0] or not track or track[0] != "upload_failed":
+                    continue
+                db.execute(
+                    "INSERT INTO progress VALUES (?,?,?,?,?) ON CONFLICT(clip_id) DO UPDATE SET "
+                    "phase=excluded.phase, updated_at=excluded.updated_at, "
+                    "source=CASE WHEN excluded.source='' THEN progress.source ELSE excluded.source END, "
+                    "detail=excluded.detail",
+                    (key, "queued", now, "", ""))
+                retried.append(key)
+            if not retried:
+                return False, "没有可重试的上传"
+            db.execute("INSERT OR REPLACE INTO state VALUES ('retry_requested',?)", (str(now),))
+            db.execute("INSERT OR REPLACE INTO state VALUES ('next_upload_at','0')")
+            db.commit()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error):
+        return False, "上传队列暂时无法写入"
+    return True, "已安排重新上传"
 
 
 def _map_archive(p):
@@ -5439,6 +5492,29 @@ class Handler(BaseHTTPRequestHandler):
                 return
             status, msg = cloud_enroll_once(code.strip())
             self._json({"ok": status == 200, "msg": msg}, status)
+            return
+        if path == "/api/cloud/retry":
+            if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+                self._json({"ok": False, "msg": "需要 JSON 请求"}, 415)
+                return
+            origin = self.headers.get("Origin", "")
+            if not origin or urllib.parse.urlsplit(origin).netloc != self.headers.get("Host"):
+                self._json({"ok": False, "msg": "请求来源不匹配"}, 403)
+                return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                if not 1 <= n <= 4096:
+                    raise ValueError("size")
+                body = json.loads(self.rfile.read(n))
+                ids = body.get("ids") if isinstance(body, dict) else None
+                if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+                        or any(not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key) for key in ids)):
+                    raise ValueError("ids")
+            except (ValueError, TypeError, json.JSONDecodeError, OSError):
+                self._json({"ok": False, "msg": "参数错误"}, 400)
+                return
+            ok, msg = cloud_retry_uploads(list(dict.fromkeys(ids)))
+            self._json({"ok": ok, "msg": msg}, 200 if ok else 409)
             return
         if path == "/api/auth/pass":
             try:
