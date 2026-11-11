@@ -71,15 +71,10 @@ LANG_JS = json.dumps([[c, n] for c, n in LANG_NAMES], ensure_ascii=False, separa
 MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频有自己的更小限制)
 
 # ---------------- 版本与在线升级 (OTA) ----------------
-# 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
-# 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.7"
+# 升级方式: 只从 GitHub 拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
+APP_VERSION = "2.5.8"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
-_OTA_DEFAULT = ",".join([
-    "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
-    "https://ghfast.top/https://raw.githubusercontent.com/%s/main" % OTA_REPO,
-    "https://cdn.jsdelivr.net/gh/%s@main" % OTA_REPO,
-])
+_OTA_DEFAULT = "https://raw.githubusercontent.com/%s/main" % OTA_REPO
 OTA_SOURCES = [s.strip().rstrip("/") for s in os.environ.get("TSF_OTA_SOURCES", _OTA_DEFAULT).split(",") if s.strip()]
 OTA_BACKUP = os.environ.get("TSF_OTA_BACKUP", "/opt/tesla-sentry/sentry-viewer.bak.py")
 OTA_STATE = os.environ.get("TSF_OTA_STATE", "/opt/tesla-sentry/ota-state.json")
