@@ -26,6 +26,7 @@ import ssl
 import zipfile
 import tempfile
 import sys
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # 路径/端口优先取环境变量 (install.sh 写入 /etc/tesla-sentry.conf, 服务单元以 EnvironmentFile 注入),
@@ -65,15 +66,140 @@ def lang_from_accept(hdr, default="zh"):
     return default
 
 CAT_NAMES = {"SentryClips": "哨兵告警", "SavedClips": "手动保存", "RecentClips": "行车记录"}
-# 注入页面用的 JSON (预生成, 避免每次请求都序列化)
-I18N_JS = json.dumps(LANG_TABLE, ensure_ascii=False, separators=(",", ":"))
 LANG_JS = json.dumps([[c, n] for c, n in LANG_NAMES], ensure_ascii=False, separators=(",", ":"))
+LANG_TABLE.setdefault("en", {}).update({"Wi-Fi 网络": "Wi-Fi networks", "扫描附近网络": "Scan networks",
+    "输入 Wi-Fi 密码": "Enter Wi-Fi password", "连接此网络": "Connect",
+    "正在扫描…": "Scanning…", "正在切换网络…": "Switching networks…"})
+I18N_JS = json.dumps(LANG_TABLE, ensure_ascii=False, separators=(",", ":"))
 MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频有自己的更小限制)
+
+# Wi-Fi changes are initiated from the authenticated local settings page only.
+WIFI_LOCK = threading.Lock()
+WIFI_JOB = {"state": "idle", "ssid": "", "message": ""}
+WIFI_CONN_DIR = "/etc/NetworkManager/system-connections"
+
+
+def wifi_fields(line):
+    """Split nmcli terse output while respecting escaped colons and backslashes."""
+    fields, part, escaped = [], [], False
+    for char in line:
+        if escaped:
+            part.append(char); escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == ":":
+            fields.append("".join(part)); part = []
+        else:
+            part.append(char)
+    fields.append("".join(part))
+    return fields
+
+
+def wifi_nmcli(*args, timeout=20):
+    binary = shutil.which("nmcli")
+    if not binary or os.geteuid() != 0:
+        raise RuntimeError("需要以 root 运行的 NetworkManager")
+    return subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout,
+                          env=dict(os.environ, LC_ALL="C"))
+
+
+def wifi_interface():
+    result = wifi_nmcli("-t", "-f", "DEVICE,TYPE", "device", "status")
+    if result.returncode:
+        raise RuntimeError("NetworkManager 不可用")
+    for line in result.stdout.splitlines():
+        fields = wifi_fields(line)
+        if len(fields) >= 2 and fields[1] == "wifi" and re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", fields[0]):
+            return fields[0]
+    raise RuntimeError("未找到可管理的 Wi-Fi 网卡")
+
+
+def wifi_scan():
+    iface = wifi_interface()
+    result = wifi_nmcli("-t", "--escape", "yes", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
+                        "device", "wifi", "list", "ifname", iface, "--rescan", "yes", timeout=25)
+    if result.returncode:
+        raise RuntimeError("Wi-Fi 扫描失败")
+    found = {}
+    for line in result.stdout.splitlines():
+        fields = wifi_fields(line)
+        if len(fields) < 4 or not fields[1]:
+            continue
+        active, ssid, strength, security = fields[:4]
+        if security == "--":
+            security = ""
+        if len(ssid.encode("utf-8")) > 32:
+            continue
+        item = {"ssid": ssid, "signal": int(strength) if strength.isdigit() else 0,
+                "security": security, "connected": active == "*"}
+        if ssid not in found or (item["connected"], item["signal"]) > (found[ssid]["connected"], found[ssid]["signal"]):
+            found[ssid] = item
+    return {"interface": iface, "networks": sorted(found.values(), key=lambda x: (-x["connected"], -x["signal"], x["ssid"]))}
+
+
+def wifi_connect_worker(iface, ssid, password, key_mgmt):
+    global WIFI_JOB
+    profile = "tsf-" + hashlib.sha256(ssid.encode("utf-8")).hexdigest()[:16]
+    profile_path = os.path.join(WIFI_CONN_DIR, profile + ".nmconnection")
+    pending_path = None
+    previous = None
+    wrote_profile = False
+    try:
+        time.sleep(0.7)  # Let the HTTP response leave before changing its network route.
+        # NetworkManager keyfile keeps the secret out of process arguments and survives reboot.
+        def keyfile_value(value):
+            return value.replace("\\", "\\\\").replace("\n", "\\n").replace(";", "\\;")
+        lines = ["[connection]", "id=" + profile,
+                 "uuid=" + str(uuid.uuid5(uuid.NAMESPACE_URL, "tesla-sentry-wifi:" + ssid)),
+                 "type=wifi", "interface-name=" + iface, "autoconnect=true",
+                 "autoconnect-priority=100", "", "[wifi]", "mode=infrastructure",
+                 "ssid=" + keyfile_value(ssid), ""]
+        if password:
+            lines += ["[wifi-security]", "key-mgmt=" + key_mgmt, "psk=" + keyfile_value(password), ""]
+        lines += ["[ipv4]", "method=auto", "", "[ipv6]", "method=auto", ""]
+        conn_dir = os.path.dirname(profile_path)
+        os.makedirs(conn_dir, mode=0o700, exist_ok=True)
+        if os.path.exists(profile_path):
+            with open(profile_path, "rb") as stream:
+                previous = stream.read()
+        fd, pending_path = tempfile.mkstemp(prefix=".tsf-wifi-", dir=conn_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write("\n".join(lines))
+        os.replace(pending_path, profile_path)
+        wrote_profile = True
+        pending_path = None
+        if wifi_nmcli("connection", "load", profile_path).returncode:
+            raise RuntimeError("无法保存 Wi-Fi 配置")
+        if wifi_nmcli("connection", "up", "id", profile, "ifname", iface, timeout=50).returncode:
+            raise RuntimeError("连接失败，请检查密码或信号")
+        WIFI_JOB = {"state": "connected", "ssid": ssid, "message": "已连接"}
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        if wrote_profile:
+            try:
+                if previous is None:
+                    wifi_nmcli("connection", "delete", "id", profile)
+                    os.unlink(profile_path)
+                else:
+                    fd, restore_path = tempfile.mkstemp(prefix=".tsf-wifi-", dir=os.path.dirname(profile_path))
+                    with os.fdopen(fd, "wb") as stream:
+                        os.fchmod(stream.fileno(), 0o600)
+                        stream.write(previous)
+                    os.replace(restore_path, profile_path)
+                    wifi_nmcli("connection", "load", profile_path)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                pass
+        WIFI_JOB = {"state": "failed", "ssid": ssid, "message": "连接失败，请检查密码或信号"}
+    finally:
+        if pending_path:
+            try: os.unlink(pending_path)
+            except OSError: pass
+        WIFI_LOCK.release()
 
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.12"
+APP_VERSION = "2.5.13"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -800,6 +926,7 @@ select.ninput { cursor:pointer; }
     <button class="stab" id="st-wraps" onclick="stab('wraps')">🚙 涂装</button>
     <button class="stab" id="st-notify" onclick="stab('notify')">🔔 推送</button>
     <button class="stab" id="st-cloud" onclick="stab('cloud')">☁ 麦特云</button>
+    <button class="stab" id="st-wifi" onclick="stab('wifi')">📶 Wi-Fi</button>
     <button class="stab" id="st-auth" onclick="stab('auth')">🔑 账号</button>
     <button class="stab" id="st-lang" onclick="stab('lang')">🌐 语言</button>
     <button class="stab" id="st-skin" onclick="stab('skin')">🎨 网页背景</button>
@@ -895,6 +1022,17 @@ select.ninput { cursor:pointer; }
     <input class="ninput" id="cloud-code" type="password" autocomplete="off" spellcheck="false" placeholder="一次性绑定密钥">
     <div class="updbtns"><button class="mini primary" id="cloud-enroll-btn" onclick="cloudEnroll()">绑定并启动同步</button></div>
     <div class="hint" id="cloud-msg" role="status"></div>
+  </div>
+  <div id="tab-wifi" style="display:none">
+    <div class="hint">选择停车后可用的 Wi-Fi。切换时当前连接可能断开；请用新网络中的板子地址重新打开页面。</div>
+    <div class="updbtns"><button class="mini" id="wifi-scan-btn" onclick="wifiLoad()">扫描附近网络</button></div>
+    <div class="hint" id="wifi-msg" role="status"></div>
+    <div id="wifi-list"></div>
+    <div id="wifi-form" style="display:none;margin-top:12px">
+      <div class="hint" id="wifi-selected"></div>
+      <input class="ninput" id="wifi-password" type="password" autocomplete="new-password" placeholder="输入 Wi-Fi 密码">
+      <div class="updbtns"><button class="mini primary" id="wifi-connect-btn" onclick="wifiConnect()">连接此网络</button></div>
+    </div>
   </div>
   <div id="tab-update" style="display:none">
     <div class="updrow"><span class="updk">当前版本</span><b id="upd-cur">—</b></div>
@@ -2140,7 +2278,7 @@ function doLogout() {
   location.href = '/logout';
 }
 function stab(which) {
-  ['files', 'audio', 'wraps', 'notify', 'cloud', 'auth', 'lang', 'skin', 'update'].forEach(k => {
+  ['files', 'audio', 'wraps', 'notify', 'cloud', 'wifi', 'auth', 'lang', 'skin', 'update'].forEach(k => {
     const b = document.getElementById('st-' + k), t = document.getElementById('tab-' + k);
     if (b) b.classList.toggle('active', k === which);
     if (t) t.style.display = k === which ? '' : 'none';
@@ -2149,6 +2287,7 @@ function stab(which) {
   if (which === 'notify') ntLoad();
   if (which === 'auth') pwLoad();
   if (which === 'cloud') cloudLoad();
+  if (which === 'wifi') wifiLoad();
   if (which === 'wraps') refreshWraps();
 }
 
@@ -2271,6 +2410,62 @@ async function ntTest() {
 function ntMediaUI() {
   const v = document.getElementById('nt-media').value === 'video';
   document.getElementById('nt-vwrap').style.display = v ? '' : 'none';
+}
+
+/* ---------- 板子 Wi-Fi ---------- */
+let wifiChoice = null, wifiPoll = null;
+function wifiMessage(message) { document.getElementById('wifi-msg').textContent = t(message); }
+function wifiSelect(network) {
+  wifiChoice = network;
+  document.getElementById('wifi-selected').textContent = network.ssid + (network.security ? ' · ' + network.security : ' · 开放网络');
+  const input = document.getElementById('wifi-password');
+  input.value = '';
+  input.style.display = network.security ? '' : 'none';
+  document.getElementById('wifi-form').style.display = '';
+  if (network.security) input.focus();
+}
+async function wifiLoad() {
+  const list = document.getElementById('wifi-list'), button = document.getElementById('wifi-scan-btn');
+  button.disabled = true; wifiMessage('正在扫描…'); list.replaceChildren();
+  document.getElementById('wifi-form').style.display = 'none'; wifiChoice = null;
+  try {
+    const response = await fetch('/api/wifi/scan', {cache:'no-store'}), data = await response.json();
+    if (!response.ok) throw new Error(data.msg || '扫描失败');
+    wifiMessage(data.networks.length ? '选择要连接的网络' : '附近没有发现 Wi-Fi 网络');
+    data.networks.forEach(network => {
+      const row = document.createElement('button');
+      row.type = 'button'; row.className = 'nrow';
+      row.style.cssText = 'width:100%;text-align:left;cursor:pointer;background:transparent;color:inherit;border:0;border-bottom:1px solid #3a4652;padding:12px 4px';
+      row.textContent = (network.connected ? '✓ ' : '') + network.ssid + ' · ' + network.signal + '% · ' + (network.security || '开放网络');
+      row.onclick = () => wifiSelect(network);
+      list.appendChild(row);
+    });
+  } catch (error) { wifiMessage(error.message || '扫描失败'); }
+  finally { button.disabled = false; }
+}
+async function wifiConnect() {
+  if (!wifiChoice) return;
+  const input = document.getElementById('wifi-password'), button = document.getElementById('wifi-connect-btn');
+  const password = wifiChoice.security ? input.value : '';
+  if (wifiChoice.security && password.length < 8) { wifiMessage('密码至少 8 位'); return; }
+  button.disabled = true; wifiMessage('正在切换网络…');
+  try {
+    const response = await fetch('/api/wifi/connect', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ssid:wifiChoice.ssid,password})});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.msg || '连接失败');
+    wifiMessage('已开始连接。网页可能断开；请在新网络中重新打开板子地址。');
+    clearInterval(wifiPoll);
+    wifiPoll = setInterval(async () => {
+      try {
+        const status = await (await fetch('/api/wifi/status', {cache:'no-store'})).json();
+        if (status.state === 'connected' || status.state === 'failed') {
+          clearInterval(wifiPoll); wifiMessage(status.message || status.state);
+        }
+      } catch (_) { clearInterval(wifiPoll); }
+    }, 2000);
+  } catch (error) { wifiMessage(error.message || '连接请求失败'); button.disabled = false; }
+  finally { input.value = ''; }
 }
 
 /* ---------- 麦特云设备绑定 ---------- */
@@ -5151,6 +5346,19 @@ class Handler(BaseHTTPRequestHandler):
             html = (HTML.replace("__CAT_NAMES__", json.dumps(CAT_NAMES, ensure_ascii=False))
                     .replace("__I18N__", I18N_JS).replace("__LANGS__", LANG_JS))
             self._send(200, html.encode())
+        elif path == "/api/wifi/scan":
+            if not AUTH_ON:
+                self._json({"msg": "请先启用网页登录保护"}, 403)
+                return
+            try:
+                self._json(wifi_scan())
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                self._json({"msg": str(exc)}, 503)
+        elif path == "/api/wifi/status":
+            if not AUTH_ON:
+                self._json({"msg": "请先启用网页登录保护"}, 403)
+                return
+            self._json(dict(WIFI_JOB))
         elif path == "/api/stitch/status":
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             job = STITCH_JOBS.get(q.get("id", [""])[0])
@@ -5471,6 +5679,64 @@ class Handler(BaseHTTPRequestHandler):
         if not self._gate():
             return
         path = urllib.parse.unquote(self.path)
+        if path == "/api/wifi/connect":
+            if not AUTH_ON:
+                self._json({"msg": "请先启用网页登录保护"}, 403)
+                return
+            if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+                self._json({"msg": "需要 JSON 请求"}, 415)
+                return
+            origin = urllib.parse.urlsplit(self.headers.get("Origin", ""))
+            if origin.scheme not in ("http", "https") or origin.netloc != self.headers.get("Host", ""):
+                self._json({"msg": "请求来源不匹配"}, 403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 1 <= length <= 512:
+                    raise ValueError("size")
+                body = json.loads(self.rfile.read(length))
+                ssid, password = body.get("ssid"), body.get("password")
+                if (not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= 32
+                        or any(ord(c) < 32 for c in ssid)
+                        or not isinstance(password, str) or len(password) > 64
+                        or any(ord(c) < 32 for c in password)):
+                    raise ValueError("fields")
+            except (ValueError, TypeError, AttributeError, json.JSONDecodeError, OSError):
+                self._json({"msg": "Wi-Fi 参数错误"}, 400)
+                return
+            if not WIFI_LOCK.acquire(blocking=False):
+                self._json({"msg": "正在连接，请稍候"}, 409)
+                return
+            started = False
+            try:
+                scan = wifi_scan()
+                network = next((n for n in scan["networks"] if n["ssid"] == ssid), None)
+                if not network:
+                    self._json({"msg": "该网络已不在扫描范围内，请重新扫描"}, 409)
+                    return
+                security = network["security"].upper()
+                if security and ("802.1X" in security or "WEP" in security or "WPA" not in security):
+                    self._json({"msg": "暂不支持该网络的认证方式"}, 400)
+                    return
+                if security and not (8 <= len(password) <= 63 or len(password) == 64 and re.fullmatch(r"[0-9A-Fa-f]{64}", password)):
+                    self._json({"msg": "密码需为 8–63 位或 64 位十六进制"}, 400)
+                    return
+                if not security and password:
+                    self._json({"msg": "开放网络不需要密码"}, 400)
+                    return
+                key_mgmt = "sae" if "WPA3" in security and "WPA2" not in security else "wpa-psk"
+                WIFI_JOB.update(state="connecting", ssid=ssid, message="正在连接")
+                threading.Thread(target=wifi_connect_worker,
+                                 args=(scan["interface"], ssid, password, key_mgmt), daemon=True).start()
+                started = True
+                self._json({"ok": True, "msg": "已开始连接"}, 202)
+                return
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                self._json({"msg": str(exc)}, 503)
+                return
+            finally:
+                if not started:
+                    WIFI_LOCK.release()
         if path == "/api/cloud/enroll":
             if not AUTH_ON or self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
                 self._json({"ok": False, "msg": "需要网页登录保护和 JSON 请求"}, 403)

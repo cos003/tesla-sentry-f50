@@ -1,12 +1,12 @@
 {
-  "version": "2.5.12",
+  "version": "2.5.13",
   "date": "2026-11-15",
   "notes": [
-    "修复视频代理连接 Cloudflare 时返回 403"
+    "新增板子 Wi-Fi 设置：扫描网络、输入密码并连接，重启后自动连接"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "2975edb0e0b0b4b5d12bfed410d8aa67e72c1c0cd2825f634ac589e466adbd88",
+    "sentry-viewer.py": "bf941a7057fd99c7c8149a612c8394484a20e7c6ddf2c25c2fdc20b3e4824641",
     "sentry-cloud-sync.py": "e1daa7f66ffdd053fd15ee379ddca458a7e5e9c0ed40c0b28d7f01f44da43bee",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
     "scripts/install-cloud-sync.sh": "3fb788466ee13ffdc272b951f911b7284edb69b78600256bdd8a18faf1e4e629"
