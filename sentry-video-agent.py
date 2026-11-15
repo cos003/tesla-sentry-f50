@@ -20,6 +20,7 @@ RANGE = re.compile(r'^bytes=(\d+)-(\d*)$')
 USER_AGENT = 'MyTeslaCloud-Sentry-Video/1'
 THUMB_LIMIT = 512 * 1024
 # 与 sentry-viewer.py 的 thumb_file 共用同一份 eMMC 抽帧缓存 (两个服务同一个 EnvironmentFile)。
+# 服务本身 ProtectSystem=strict, 依赖 unit 里的 ReadWritePaths=$TSF_CACHE 才能回写。
 THUMB_DIR = Path(os.environ.get('TSF_CACHE', '/opt/mu300')) / 'thumbs'
 
 
@@ -168,7 +169,9 @@ def send_result(origin, ticket, job, status, source, start, length, content_rang
         response = connection.getresponse()
         response.read()
         if response.status != 204:
-            raise OSError('video gateway rejected result')
+            # 多半是网关已经把该任务判超时并回了 503; 丢弃结果即可,
+            # 不值得为它重启整个会话、重新登录和重握手。
+            print('Video gateway dropped result %s: HTTP %d' % (job.get('job_id'), response.status), flush=True)
     finally:
         connection.close()
 
@@ -181,7 +184,12 @@ def serve(config, archive, once=False):
             if not session.get('origin') or not session.get('ticket'):
                 raise ValueError('invalid video session')
             while time.time() < session['expires_at'] - 30:
-                job = request_json(session['origin'] + '/agent/jobs', session['ticket'])
+                try:
+                    job = request_json(session['origin'] + '/agent/jobs', session['ticket'])
+                except urllib.error.HTTPError as error:
+                    if error.code == 409:
+                        continue  # 上一次长轮询还挂在网关没释放, 稍后再试, 别重启会话
+                    raise
                 if not job:
                     continue
                 if job.get('kind') == 'recordings':
