@@ -13,6 +13,7 @@
 用户点一下就能升级, 无需重新刷固件或拷文件。
 """
 import datetime
+import base64
 import hashlib
 import json
 import os
@@ -33,6 +34,16 @@ def main():
         print("版本号格式不对, 例: 2.2.0")
         return 1
     notes = [a.strip() for a in sys.argv[2:] if a.strip()]
+    installer = os.path.join(ROOT, "scripts", "install-cloud-sync.sh")
+    agent = open(os.path.join(ROOT, "sentry-video-agent.py"), "rb").read()
+    installer_src = open(installer, encoding="utf-8").read()
+    encoded = base64.b64encode(agent).decode("ascii")
+    installer_src, count = re.subn(r'^TSF_VIDEO_AGENT_B64="[A-Za-z0-9+/=]*"$',
+                                   'TSF_VIDEO_AGENT_B64="%s"' % encoded, installer_src, count=1, flags=re.M)
+    if count != 1:
+        print("安装脚本缺少视频代理嵌入标记")
+        return 1
+    open(installer, "w", encoding="utf-8", newline="\n").write(installer_src)
     src = open(APP, encoding="utf-8").read()
     new_src, n = re.subn(r'^(APP_VERSION\s*=\s*)"[^"]+"', r'\1"%s"' % ver, src, count=1, flags=re.M)
     if not n:

@@ -1,4 +1,5 @@
 import hashlib
+import base64
 import importlib.util
 import json
 from pathlib import Path
@@ -31,8 +32,9 @@ class BundleTest(unittest.TestCase):
         (self.root / 'cloud.json').write_bytes(b'PRIVATE DEVICE CREDENTIALS')
         (self.root / 'queue.sqlite').write_bytes(b'PENDING TELEMETRY')
         self.unit = Path(self.tmp.name) / 'cloud.service'; self.unit.write_bytes(b'old unit')
+        self.video_unit = Path(self.tmp.name) / 'video.service'; self.video_unit.write_bytes(b'old video unit')
         self.recover_unit = Path(self.tmp.name) / 'recovery.service'
-        for patch in (mock.patch.object(ota, 'UNIT', self.unit), mock.patch.object(ota, 'RECOVERY', self.recover_unit),
+        for patch in (mock.patch.object(ota, 'UNIT', self.unit), mock.patch.object(ota, 'VIDEO_UNIT', self.video_unit), mock.patch.object(ota, 'RECOVERY', self.recover_unit),
                       mock.patch.object(ota, 'systemctl'), mock.patch.object(ota, 'active', return_value=True)):
             patch.start(); self.addCleanup(patch.stop)
 
@@ -44,6 +46,7 @@ class BundleTest(unittest.TestCase):
         for name in ota.FILES:
             self.assertEqual((self.root / name).read_bytes(), b'old-' + name.encode())
         self.assertEqual(self.unit.read_bytes(), b'old unit')
+        self.assertEqual(self.video_unit.read_bytes(), b'old video unit')
         self.intact_user_data()
 
     def test_checksum_and_file_allowlist_reject_before_modification(self):
@@ -109,6 +112,13 @@ class BundleTest(unittest.TestCase):
         shell = 'TSF_CLOUD_DIR=/opt/tesla-sentry\nTSF_PYTHON=/usr/bin/python3\ncat <<EOF\n' + unit + '\nEOF\n'
         result = subprocess.run(['sh', '-eu'], input=shell, capture_output=True, text=True, check=True)
         self.assertIn('--config ${CREDENTIALS_DIRECTORY}/cloud.json', result.stdout)
+
+    def test_release_installer_embeds_the_current_video_agent(self):
+        import re
+        script = (ROOT / 'scripts/install-cloud-sync.sh').read_text()
+        encoded = re.search(r'^TSF_VIDEO_AGENT_B64="([A-Za-z0-9+/=]+)"$', script, re.M)
+        self.assertIsNotNone(encoded)
+        self.assertEqual(base64.b64decode(encoded[1]), (ROOT / 'sentry-video-agent.py').read_bytes())
 
 
 if __name__ == '__main__': unittest.main()

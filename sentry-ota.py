@@ -17,6 +17,7 @@ import urllib.request
 
 FILES = ('sentry-viewer.py', 'sentry-cloud-sync.py', 'sentry-ota.py', 'scripts/install-cloud-sync.sh')
 UNIT = Path('/etc/systemd/system/sentry-cloud-sync.service')
+VIDEO_UNIT = Path('/etc/systemd/system/sentry-video-agent.service')
 RECOVERY = Path('/etc/systemd/system/tesla-sentry-ota-recover.service')
 
 
@@ -89,8 +90,11 @@ def health(port, cloud):
 def restore(root, journal):
     backup = root / '.ota' / journal['backup']
     systemctl('stop', 'sentry-cloud-sync.service', check=False)
+    systemctl('stop', 'sentry-video-agent.service', check=False)
+    if not any(item['name'] == '@video_unit' and item['existed'] for item in journal['originals']):
+        systemctl('disable', 'sentry-video-agent.service', check=False)
     for item in journal['originals']:
-        target = root / item['name'] if item['name'] != '@unit' else UNIT
+        target = UNIT if item['name'] == '@unit' else VIDEO_UNIT if item['name'] == '@video_unit' else root / item['name']
         if item['existed']:
             atomic(target, (backup / item['backup']).read_bytes(), item['mode'])
         elif target.exists():
@@ -98,6 +102,7 @@ def restore(root, journal):
     systemctl('daemon-reload')
     systemctl('restart', 'sentry-viewer.service')
     if journal['cloud_active']: systemctl('start', 'sentry-cloud-sync.service')
+    if journal.get('video_active'): systemctl('start', 'sentry-video-agent.service')
     journal['phase'] = 'rolled_back'
     save(root / '.ota' / 'journal.json', journal)
 
@@ -110,10 +115,11 @@ def install(root, stage, port):
         raise RuntimeError('interrupted update needs recovery first')
     backup = Path(tempfile.mkdtemp(prefix='backup-', dir=ota))
     cloud_active = active('sentry-cloud-sync.service')
-    journal = {'phase': 'prepared', 'version': manifest['version'], 'cloud_active': cloud_active,
+    video_active = active('sentry-video-agent.service')
+    journal = {'phase': 'prepared', 'version': manifest['version'], 'cloud_active': cloud_active, 'video_active': video_active,
                'backup': backup.name, 'originals': []}
-    for index, name in enumerate((*FILES, '.ota/installed.json', '@unit')):
-        target = UNIT if name == '@unit' else root / name
+    for index, name in enumerate((*FILES, 'sentry-video-agent.py', '.ota/installed.json', '@unit', '@video_unit')):
+        target = UNIT if name == '@unit' else VIDEO_UNIT if name == '@video_unit' else root / name
         if target.is_symlink(): raise ValueError('symlink update target')
         item = {'name': name, 'backup': str(index), 'existed': target.exists(), 'mode': 0o644}
         if target.exists():
@@ -127,7 +133,7 @@ def install(root, stage, port):
     unit = '''[Unit]
 Description=Recover interrupted Tesla Sentry bundle update
 After=local-fs.target
-Before=sentry-viewer.service sentry-cloud-sync.service
+Before=sentry-viewer.service sentry-cloud-sync.service sentry-video-agent.service
 [Service]
 Type=oneshot
 ExecStart=%s %s/.ota/recovery.py --root %s --recover
@@ -139,6 +145,7 @@ WantedBy=multi-user.target
     journal['phase'] = 'installing'; save(prior, journal)
     try:
         if cloud_active: systemctl('stop', 'sentry-cloud-sync.service')
+        if video_active: systemctl('stop', 'sentry-video-agent.service')
         for name in FILES:
             atomic(root / name, (stage / name).read_bytes(), 0o755)
         if (root / 'cloud.json').exists():
@@ -147,6 +154,9 @@ WantedBy=multi-user.target
         save(ota / 'installed.json', {'version': manifest['version'], 'files': manifest['files']})
         systemctl('restart', 'sentry-viewer.service')
         if cloud_active: systemctl('start', 'sentry-cloud-sync.service')
+        if cloud_active:
+            systemctl('enable', 'sentry-video-agent.service')
+            systemctl('start', 'sentry-video-agent.service')
         health(port, cloud_active)
         journal['phase'] = 'complete'; save(prior, journal)
         for path in ota.iterdir():
