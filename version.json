@@ -1,15 +1,14 @@
 {
-  "version": "2.5.11",
+  "version": "2.5.12",
   "date": "2026-11-15",
   "notes": [
-    "已绑定设备自动连接远程录像网关",
-    "按需播放本地哨兵录像，无需逐台配置隧道"
+    "修复视频代理连接 Cloudflare 时返回 403"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "dc04e202fc208a0f39c4141ecae3a2072f9e92e51089d8324eda6040f72595ee",
+    "sentry-viewer.py": "2975edb0e0b0b4b5d12bfed410d8aa67e72c1c0cd2825f634ac589e466adbd88",
     "sentry-cloud-sync.py": "e1daa7f66ffdd053fd15ee379ddca458a7e5e9c0ed40c0b28d7f01f44da43bee",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
-    "scripts/install-cloud-sync.sh": "84ca8ef375f6518766f55e340061d2a04476d0e2e7270ab95695c3658766efca"
+    "scripts/install-cloud-sync.sh": "3fb788466ee13ffdc272b951f911b7284edb69b78600256bdd8a18faf1e4e629"
   }
 }

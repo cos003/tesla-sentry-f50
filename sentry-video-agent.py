@@ -15,11 +15,13 @@ from pathlib import Path
 CATS = ('SentryClips', 'SavedClips', 'RecentClips')
 MEDIA = re.compile(r'^/media/(SentryClips|SavedClips|RecentClips)/([\w. -]+)/([\w. -]+\.mp4)$', re.I)
 RANGE = re.compile(r'^bytes=(\d+)-(\d*)$')
+USER_AGENT = 'MyTeslaCloud-Sentry-Video/1'
 
 
 def request_json(url, token, method='GET'):
     req = urllib.request.Request(url, data=b'{}' if method == 'POST' else None, method=method,
-                                 headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+                                 headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json',
+                                          'User-Agent': USER_AGENT})
     with urllib.request.urlopen(req, timeout=35) as response:
         if response.status == 204:
             return None
@@ -76,6 +78,7 @@ def send_result(origin, ticket, job, status, source, start, length, content_rang
     try:
         connection.putrequest('POST', '/agent/result/' + job['job_id'])
         connection.putheader('Authorization', 'Bearer ' + ticket)
+        connection.putheader('User-Agent', USER_AGENT)
         connection.putheader('X-Video-Status', str(status))
         connection.putheader('Content-Length', str(length))
         if status == 206:
