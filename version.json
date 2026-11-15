@@ -1,14 +1,15 @@
 {
-  "version": "2.5.13",
+  "version": "2.5.14",
   "date": "2026-11-15",
   "notes": [
-    "新增板子 Wi-Fi 设置：扫描网络、输入密码并连接，重启后自动连接"
+    "云端哨兵录像列表显示事件信息和缩略图",
+    "视频代理支持按触发画面生成封面"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "bf941a7057fd99c7c8149a612c8394484a20e7c6ddf2c25c2fdc20b3e4824641",
+    "sentry-viewer.py": "8bf15b60dfc9ed1b6e47f2041f909289ceb6537dbc4c563fc92d781a82a64ce8",
     "sentry-cloud-sync.py": "e1daa7f66ffdd053fd15ee379ddca458a7e5e9c0ed40c0b28d7f01f44da43bee",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
-    "scripts/install-cloud-sync.sh": "3fb788466ee13ffdc272b951f911b7284edb69b78600256bdd8a18faf1e4e629"
+    "scripts/install-cloud-sync.sh": "4ea7cca8ce0edece860ad4b67d1f10e6da03d1cc26173060ff72bdb5572439a0"
   }
 }

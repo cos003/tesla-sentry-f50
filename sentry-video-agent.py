@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +17,7 @@ CATS = ('SentryClips', 'SavedClips', 'RecentClips')
 MEDIA = re.compile(r'^/media/(SentryClips|SavedClips|RecentClips)/([\w. -]+)/([\w. -]+\.mp4)$', re.I)
 RANGE = re.compile(r'^bytes=(\d+)-(\d*)$')
 USER_AGENT = 'MyTeslaCloud-Sentry-Video/1'
+THUMB_LIMIT = 512 * 1024
 
 
 def request_json(url, token, method='GET'):
@@ -38,16 +40,53 @@ def events(archive):
                 if not folder.is_dir() or not re.fullmatch(r'[\w. -]{1,80}', folder.name) or folder.name in ('.', '..'):
                     continue
                 videos = []
+                size = 0
                 for file in sorted(folder.iterdir()):
                     if file.is_file() and re.fullmatch(r'[\w. -]+\.mp4', file.name, re.I):
                         videos.append({'url': '/media/%s/%s/%s' % (cat, folder.name, file.name),
                                        'cam': file.stem.rsplit('-', 1)[-1], 'f': file.name})
+                        try:
+                            size += file.stat().st_size
+                        except OSError:
+                            pass
                 if videos:
-                    found.append({'name': folder.name, 'videos': videos})
+                    meta = {}
+                    try:
+                        raw = json.loads((folder / 'event.json').read_text(encoding='utf-8'))
+                        if isinstance(raw, dict):
+                            meta = {key: raw[key] for key in ('reason', 'camera', 'timestamp', 'city', 'street')
+                                    if key in raw and isinstance(raw[key], (str, int, float))}
+                    except (OSError, ValueError):
+                        pass
+                    found.append({'name': folder.name, 'videos': videos, 'size': size, 'meta': meta,
+                                  'thumbnail_supported': True})
                 if len(found) >= 500:
                     break
         output[cat] = found
     return json.dumps(output, ensure_ascii=False).encode('utf-8')
+
+
+def thumb_job(archive, path, second):
+    status, source, _, _, _ = file_job(archive, path, '')
+    if status != 200:
+        return 404, b''
+    try:
+        second = float(second)
+        if not 0 <= second <= 70:
+            return 404, b''
+    except (TypeError, ValueError):
+        return 404, b''
+    ffmpeg = '/opt/mu300/ffmpeg/ffmpeg' if Path('/opt/mu300/ffmpeg/ffmpeg').exists() else 'ffmpeg'
+    try:
+        result = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-ss', str(second),
+                                 '-i', str(source), '-frames:v', '1', '-vf', 'scale=400:-2',
+                                 '-q:v', '7', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-'],
+                                capture_output=True, timeout=25, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return 503, b''
+    if result.returncode or not result.stdout.startswith(b'\xff\xd8') or len(result.stdout) > THUMB_LIMIT:
+        return 404, b''
+    return 200, result.stdout
 
 
 def file_job(archive, path, range_header):
@@ -121,6 +160,9 @@ def serve(config, archive, once=False):
                 elif job.get('kind') == 'video':
                     status, source, start, length, content_range = file_job(archive, job.get('path'), job.get('range'))
                     send_result(session['origin'], session['ticket'], job, status, source, start, length, content_range)
+                elif job.get('kind') == 'thumbnail':
+                    status, body = thumb_job(archive, job.get('path'), job.get('second', 1))
+                    send_result(session['origin'], session['ticket'], job, status, body, 0, len(body), '')
             retry = 3
         except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError, http.client.HTTPException) as error:
             print('Video relay unavailable: %s' % type(error).__name__, flush=True)
