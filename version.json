@@ -1,15 +1,14 @@
 {
-  "version": "2.5.14",
+  "version": "2.5.15",
   "date": "2026-11-15",
   "notes": [
-    "云端哨兵录像列表显示事件信息和缩略图",
-    "视频代理支持按触发画面生成封面"
+    "云端录像封面与查看器共用本地抽帧缓存,"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "8bf15b60dfc9ed1b6e47f2041f909289ceb6537dbc4c563fc92d781a82a64ce8",
+    "sentry-viewer.py": "b85bff61a6d86045a023a8636a01362f7cbb128c4a968d6b051b54606695cf1d",
     "sentry-cloud-sync.py": "e1daa7f66ffdd053fd15ee379ddca458a7e5e9c0ed40c0b28d7f01f44da43bee",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
-    "scripts/install-cloud-sync.sh": "4ea7cca8ce0edece860ad4b67d1f10e6da03d1cc26173060ff72bdb5572439a0"
+    "scripts/install-cloud-sync.sh": "e5aafe6f3246f2c611a8c117897ed1092ba550cbee6978e0617c51e9bc0ebd20"
   }
 }

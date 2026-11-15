@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read local archived recordings through a short-lived authenticated relay session."""
 import argparse
+import hashlib
 import http.client
 import json
 import os
@@ -18,6 +19,8 @@ MEDIA = re.compile(r'^/media/(SentryClips|SavedClips|RecentClips)/([\w. -]+)/([\
 RANGE = re.compile(r'^bytes=(\d+)-(\d*)$')
 USER_AGENT = 'MyTeslaCloud-Sentry-Video/1'
 THUMB_LIMIT = 512 * 1024
+# 与 sentry-viewer.py 的 thumb_file 共用同一份 eMMC 抽帧缓存 (两个服务同一个 EnvironmentFile)。
+THUMB_DIR = Path(os.environ.get('TSF_CACHE', '/opt/mu300')) / 'thumbs'
 
 
 def request_json(url, token, method='GET'):
@@ -76,17 +79,44 @@ def thumb_job(archive, path, second):
             return 404, b''
     except (TypeError, ValueError):
         return 404, b''
-    ffmpeg = '/opt/mu300/ffmpeg/ffmpeg' if Path('/opt/mu300/ffmpeg/ffmpeg').exists() else 'ffmpeg'
+    # 键与 sentry-viewer.py thumb_file 完全一致: realpath|size|mtime|秒(%g), 谁先生成都互相受益。
+    target = os.path.realpath(str(source))
     try:
-        result = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-ss', str(second),
-                                 '-i', str(source), '-frames:v', '1', '-vf', 'scale=400:-2',
-                                 '-q:v', '7', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-'],
-                                capture_output=True, timeout=25, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return 503, b''
-    if result.returncode or not result.stdout.startswith(b'\xff\xd8') or len(result.stdout) > THUMB_LIMIT:
+        stat = os.stat(target)
+    except OSError:
         return 404, b''
-    return 200, result.stdout
+    key = hashlib.md5(('%s|%d|%d|%g' % (target, stat.st_size, int(stat.st_mtime), second)).encode()).hexdigest()
+    cached = THUMB_DIR / (key + '.jpg')
+    try:
+        data = cached.read_bytes()
+        if data.startswith(b'\xff\xd8') and len(data) <= THUMB_LIMIT:
+            return 200, data
+        cached.unlink()  # 上次 ffmpeg 失败留下的残骸, 视为无效缓存
+    except OSError:
+        pass
+    ffmpeg = '/opt/mu300/ffmpeg/ffmpeg' if Path('/opt/mu300/ffmpeg/ffmpeg').exists() else 'ffmpeg'
+    tmp = THUMB_DIR / ('%s.%d.tmp.jpg' % (key, os.getpid()))
+    for ss in ('%g' % second, '1', '0'):  # 指定秒可能落在片段末尾之外, 逐级回落
+        try:
+            result = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-ss', ss,
+                                     '-i', target, '-frames:v', '1', '-vf', 'scale=400:-2',
+                                     '-q:v', '7', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-'],
+                                    capture_output=True, timeout=25, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return 503, b''
+        if not result.returncode and result.stdout.startswith(b'\xff\xd8') and len(result.stdout) <= THUMB_LIMIT:
+            try:  # 回写共享缓存; 写失败不影响本次返回
+                THUMB_DIR.mkdir(parents=True, exist_ok=True)
+                tmp.write_bytes(result.stdout)
+                os.replace(tmp, cached)
+            except OSError:
+                pass
+            return 200, result.stdout
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return 404, b''
 
 
 def file_job(archive, path, range_header):
