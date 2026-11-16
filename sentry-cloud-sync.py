@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '1.3.2'
+VERSION = '1.4.0'
 TELEMETRY_FIELDS = ['offset_ms', 'gear', 'speed_kmh', 'steering_deg', 'turn_signal',
                     'accel_x_mps2', 'accel_y_mps2', 'accel_z_mps2', 'ap_raw_state', 'accelerator_pct', 'brake_pressed']
 LEGACY_FIELDS = TELEMETRY_FIELDS[:9]
@@ -122,7 +122,18 @@ STAMP = re.compile(r'^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$', re.I)
 CATS = ('RecentClips', 'SavedClips', 'SentryClips')
 MAX_PENDING = 10000
 MAX_BYTES = 64 * 1024 * 1024
+# SentryClips 是哨兵事件(以停车为主), 保持 5 分钟窗口就够; RecentClips / SavedClips 是连续录像
+# 和手动保存(多是行车中), 放宽到 30 分钟, 否则哨兵事件一插队, 正在开车的片段就被挤出窗口永久丢掉。
 PARSE_WINDOW_SECONDS = 300
+LONG_WINDOW_SECONDS = 1800
+COARSE_STRIDE = 4          # 窗口内粗扫: 1/4 采样, AP 段仍有 ~150ms 分辨率
+DENSE_STRIDE = 1           # 窗口外补精扫
+COARSE_TIMEOUT = 45        # 窗口内有截止时间, 单段硬超时
+DENSE_TIMEOUT = 120
+URGENT_LEFT_SECONDS = 120  # 剩余窗口不足该值时, 一轮多扫几段
+MAX_CYCLE_CLIPS = 8
+REFINE_PER_CYCLE = 2
+MAX_BATCH = 4              # 一次提取进程最多处理几段
 
 
 class UploadDeferred(Exception):
@@ -200,6 +211,11 @@ def open_queue(path):
       );
       CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     ''')
+    clips_columns = {row[1] for row in db.execute('PRAGMA table_info(clips)')}
+    if 'quality' not in clips_columns:
+        db.execute("ALTER TABLE clips ADD COLUMN quality TEXT NOT NULL DEFAULT ''")
+    if 'status' not in clips_columns:
+        db.execute("ALTER TABLE clips ADD COLUMN status TEXT NOT NULL DEFAULT ''")
     columns = {row[1] for row in db.execute('PRAGMA table_info(failures)')}
     if 'code' not in columns:
         db.execute("ALTER TABLE failures ADD COLUMN code TEXT NOT NULL DEFAULT ''")
@@ -231,15 +247,6 @@ def segments(frames, duration_ms):
     return out
 
 
-def extract(viewer, path):
-    result = subprocess.run([sys.executable, str(viewer), '--cloud-telemetry', str(path)],
-                            capture_output=True, timeout=120,
-                            env=dict(os.environ, TSF_ARCHIVE=str(path.parents[2])))
-    if result.returncode:
-        raise ValueError('extractor failed')
-    return json.loads(result.stdout)
-
-
 def discover(archive):
     root = Path(archive).resolve()
     for cat in CATS:
@@ -258,93 +265,231 @@ def discover(archive):
                 relative = str(folder.relative_to(root) / stamp)
                 # Front first: it is the only camera extracted unless the front file is unreadable.
                 files.sort(key=lambda p: (not p.name.endswith('-front.mp4'), p.name))
-                yield digest(relative), stamp, files
+                yield digest(relative), cat, stamp, files
 
 
-def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=time.time):
-    stats = {'queued': 0, 'failed': 0, 'backpressure': False}
+def window_seconds(cat):
+    """只有哨兵事件(以停车为主)用短窗口; 连续录像和手动保存(行车中)用长窗口"""
+    return PARSE_WINDOW_SECONDS if cat == 'SentryClips' else LONG_WINDOW_SECONDS
+
+
+def scan_quality(row, signature, in_window):
+    """这一段本轮该怎么扫: 'coarse' 粗扫 / 'dense' 精扫补全 / None 不扫"""
+    if row is None:
+        return 'coarse' if in_window else None          # 历史积压不补扫
+    if row['pending']:
+        return None                                     # 不覆盖未确认的修订
+    if row['signature'] != signature:
+        return 'coarse' if in_window else None          # 内容变了: 只在窗口内重扫
+    if in_window:
+        return None                                     # 本轮已扫过
+    if row['quality'] == 'coarse' and row['status'] != 'no_sei':
+        return 'dense'                                  # 窗口外补精扫: 只有真读到 SEI 才值得
+    return None
+
+
+def read_event(folder):
+    """只取白名单字段的事件摘要; 解析失败按原样抛出, 由调用方记为解析失败"""
+    event_file = folder / 'event.json'
+    event = None
+    if event_file.is_file() and not event_file.is_symlink() and event_file.stat().st_size <= 8192:
+        raw = json.loads(event_file.read_text())
+        if isinstance(raw, dict):
+            event = {k: raw[k] for k in ('timestamp', 'city', 'street', 'reason')
+                     if isinstance(raw.get(k), str) and len(raw[k]) <= 256}
+    return event
+
+
+def mark_failed(db, clip_id, exc, clock=time.time):
+    with db:
+        db.execute('INSERT INTO failures (clip_id, retry_at) VALUES (?,?) '
+                   'ON CONFLICT(clip_id) DO UPDATE SET retry_at=excluded.retry_at',
+                   (clip_id, clock() + 300))
+    progress(db, clip_id, 'parse_failed', detail=type(exc).__name__, clock=clock)
+
+
+def extract(archive, viewer, jobs):
+    """跑一次提取进程处理这一批(同一 stride), 返回与 jobs 等长的结果, 失败的段为 None。
+
+    一次进程处理多段只为摊掉解释器启动; 单段超时由查看器的单段看门狗负责,
+    所以一段卡住不会拖死同批其它片段。
+    """
+    found = {}
+    i = 0
+    while i < len(jobs):
+        stride = jobs[i][1]
+        # 粗扫很便宜且有时间压力, 值得合批; 精扫本来就慢又没截止时间, 一段一个进程更稳。
+        width = MAX_BATCH if stride > 1 else 1
+        run = []
+        while i < len(jobs) and jobs[i][1] == stride and len(run) < width:
+            run.append(jobs[i])
+            i += 1
+        per_file = COARSE_TIMEOUT if stride > 1 else DENSE_TIMEOUT
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(viewer), '--cloud-telemetry'] +
+                [str(job[0]) for job in run] + ['--cloud-stride', str(stride)],
+                capture_output=True, timeout=min(per_file * len(run) + 20, DENSE_TIMEOUT + 20),
+                env=dict(os.environ, TSF_ARCHIVE=str(archive)))
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in proc.stdout.splitlines():
+            try:
+                item = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(item, dict) or 'error' in item or not isinstance(item.get('file'), str):
+                continue
+            if not isinstance(item.get('frames'), list) or not isinstance(item.get('duration'), (int, float)):
+                continue
+            if item['duration'] <= 0:
+                continue
+            found[item['file']] = {'duration': item['duration'], 'frames': item['frames']}
+    return [found.get(str(job[0])) for job in jobs]
+
+
+def collect(db, archive, viewer, offset, budget=1, extractor=extract, clock=time.time):
+    stats = {'queued': 0, 'failed': 0, 'backpressure': False, 'coarse': 0, 'dense': 0,
+             'skipped': 0, 'more': False, 'seconds': 0.0}
     pending, size = db.execute('SELECT count(*),coalesce(sum(length(payload)),0) FROM clips WHERE pending=1').fetchone()
     if pending >= MAX_PENDING or size >= MAX_BYTES:
         stats['backpressure'] = True
         return stats
-    processed = 0
-    for clip_id, stamp, files in discover(archive):
-        if processed >= budget:
+    rows = {row[0]: {'signature': row[1], 'revision': row[2], 'pending': row[3],
+                     'quality': row[4] or '', 'status': row[5] or ''}
+            for row in db.execute('SELECT clip_id,signature,revision,pending,quality,status FROM clips')}
+    retry = {row[0]: row[1] for row in db.execute('SELECT clip_id,retry_at FROM failures')}
+    started = clock()
+    fresh, refine = [], []
+    for clip_id, cat, stamp, files in discover(archive):
+        try:
+            recorded = dt.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S').replace(
+                tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
+        except (ValueError, TypeError):
+            continue
+        age = started - recorded
+        if age < 0:
+            continue           # 片段起始时间在当前时间之后: 时钟肯定不对, 不猜
+        left = window_seconds(cat) - age
+        row = rows.get(clip_id)
+        item = {'clip_id': clip_id, 'files': files, 'left': left,
+                'started_at_ms': int(recorded * 1000)}
+        if left >= 0:
+            fresh.append(item)
+        elif row is None:
+            stats['skipped'] += 1      # 从没扫过又超出窗口: 上传器不会补扫, 与查看器文案一致
+        elif not row['pending'] and row['quality'] == 'coarse' and row['status'] != 'no_sei':
+            refine.append(item)
+    # 剩余窗口最小的先扫: 旧代码按时间倒序, 最接近过期的反而排在最后。
+    fresh.sort(key=lambda c: c['left'])
+    refine.sort(key=lambda c: c['started_at_ms'])
+    urgent = sum(1 for c in fresh if c['left'] <= URGENT_LEFT_SECONDS)
+    limit = max(1, min(MAX_CYCLE_CLIPS, budget + urgent))
+
+    def prepare(cand, wanted):
+        clip_id = cand['clip_id']
+        if retry.get(clip_id, 0) > started:
+            return None
+        before = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in cand['files']]
+        if any(started - p.stat().st_mtime < 5 for p in cand['files']):
+            return None
+        event = read_event(cand['files'][0].parent)
+        signature = digest(canonical([before, event, 'telemetry-v2']))
+        quality = scan_quality(rows.get(clip_id), signature, cand['left'] >= 0)
+        if quality != wanted:
+            return None
+        path = cand['files'][0]
+        row = rows.get(clip_id)
+        progress(db, clip_id, 'refining' if quality == 'dense' else 'parsing', path.name, clock=clock)
+        return {'clip_id': clip_id, 'path': path, 'files': cand['files'], 'event': event,
+                'before': before, 'signature': signature, 'started_at_ms': cand['started_at_ms'],
+                'revision': (row['revision'] + 1) if row else 1, 'quality': quality,
+                'stride': COARSE_STRIDE if quality == 'coarse' else DENSE_STRIDE,
+                'timeout': COARSE_TIMEOUT if quality == 'coarse' else DENSE_TIMEOUT}
+
+    jobs = []
+    for cand in fresh:
+        if len(jobs) >= limit:
+            stats['more'] = True
             break
         try:
-            parsed = dt.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S')
-            recorded_at = parsed.replace(tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
-            # Use recording time, not mtime: copying an old video must not trigger parsing.
-            if not 0 <= clock() - recorded_at <= PARSE_WINDOW_SECONDS:
-                continue
-            before = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
-            if any(clock() - p.stat().st_mtime < 5 for p in files):
-                continue
-            event_file = files[0].parent / 'event.json'
-            event = None
-            if event_file.is_file() and not event_file.is_symlink():
-                if event_file.stat().st_size <= 8192:
-                    raw = json.loads(event_file.read_text())
-                    if isinstance(raw, dict):
-                        event = {k: raw[k] for k in ('timestamp', 'city', 'street', 'reason')
-                                 if isinstance(raw.get(k), str) and len(raw[k]) <= 256}
-            signature = digest(canonical([before, event, 'telemetry-v2']))
-            row = db.execute('SELECT signature,revision,pending FROM clips WHERE clip_id=?', (clip_id,)).fetchone()
-            if row and (row[0] == signature or row[2]):
-                continue  # Never overwrite an unacknowledged revision.
-            failure = db.execute('SELECT retry_at FROM failures WHERE clip_id=?', (clip_id,)).fetchone()
-            if failure and failure[0] > clock():
-                continue
-            processed += 1
-            # One camera per group: a successful main-camera read is the whole group's answer, even
-            # with no SEI. Otherwise a parked sentry clip would be parsed six times over for nothing.
-            # Only an unreadable (corrupt/truncated) main file falls back to the next camera.
-            tel = None
-            for path in files:
-                try:
-                    progress(db, clip_id, 'parsing', path.name, clock=clock)
-                    tel = extractor(viewer, path)
-                    break
-                except (ValueError, OSError, subprocess.SubprocessError):
-                    continue
-            if tel is None:
-                raise ValueError('no complete camera file')
-            after = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
-            if before != after:
-                raise ValueError('file changed during extraction')
-            duration = round(tel['duration'] * 1000)
-            if not 1 <= duration <= 600000:
-                raise ValueError('invalid duration')
-            start = int(recorded_at * 1000)
-            ap = segments(tel.get('frames', []), duration)
-            payload = dict(clip_id=clip_id, revision=row[1] + 1 if row else 1, started_at_ms=start,
-                           duration_ms=duration, utc_offset_minutes=offset,
-                           telemetry_status='available' if ap else ('no_ap' if tel.get('frames') else 'no_sei'),
-                           ap_segments=ap, event=event, telemetry=telemetry_samples(tel.get('frames', []), duration))
-            encoded = canonical(payload)
-            if pending + 1 > MAX_PENDING or size + len(encoded) > MAX_BYTES:
-                progress(db, clip_id, 'waiting', detail='backpressure', clock=clock)
-                stats['backpressure'] = True
-                break
-            with db:
-                db.execute('INSERT OR REPLACE INTO clips VALUES (?,?,?,?,1,?)',
-                           (clip_id, signature, payload['revision'], encoded, clock()))
-                db.execute('DELETE FROM failures WHERE clip_id=?', (clip_id,))
-            pending += 1
-            size += len(encoded)
-            progress(db, clip_id, 'queued', detail=payload['telemetry_status'], clock=clock)
-            stats['queued'] += 1
-        except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as exc:
-            with db:
-                db.execute('INSERT INTO failures (clip_id, retry_at) VALUES (?,?) ON CONFLICT(clip_id) DO UPDATE SET retry_at=excluded.retry_at',
-                           (clip_id, clock() + 300))
-            progress(db, clip_id, 'parse_failed', detail=type(exc).__name__, clock=clock)
+            job = prepare(cand, 'coarse')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            mark_failed(db, cand['clip_id'], exc, clock)
             stats['failed'] += 1
+            continue
+        if job:
+            jobs.append(job)
+    # 窗口外补精扫是低优先级: 本轮没有待扫片段、也没有临近截止的片段时才动,
+    # 这样开着车时精扫不会和行车片段抢窗口, 停车/空闲时才慢慢把历史补细。
+    if not jobs and not urgent:
+        for cand in refine[:REFINE_PER_CYCLE]:
+            try:
+                job = prepare(cand, 'dense')
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                mark_failed(db, cand['clip_id'], exc, clock)
+                stats['failed'] += 1
+                continue
+            if job:
+                jobs.append(job)
+
+    if jobs:
+        began = time.monotonic()
+        try:
+            results = extractor(archive, viewer, [(job['path'], job['stride'], job['timeout']) for job in jobs])
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            results = [None] * len(jobs)   # 整批失败按逐段失败处理, 不让一轮采集直接中断
+        stats['seconds'] = round(time.monotonic() - began, 1)
+        for job, tel in zip(jobs, results):
+            try:
+                if tel is None and len(job['files']) > 1:
+                    # 主摄读不出来(损坏/截断)才回退到下一路, 逐个单段再试
+                    for path in job['files'][1:]:
+                        single = extractor(archive, viewer, [(path, job['stride'], job['timeout'])])
+                        if single and single[0]:
+                            tel = single[0]
+                            break
+                if tel is None:
+                    raise ValueError('no complete camera file')
+                after = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in job['files']]
+                if job['before'] != after:
+                    raise ValueError('file changed during extraction')
+                duration = round(tel['duration'] * 1000)
+                if not 1 <= duration <= 600000:
+                    raise ValueError('invalid duration')
+                frames = tel.get('frames') or []
+                ap = segments(frames, duration)
+                payload = dict(clip_id=job['clip_id'], revision=job['revision'],
+                               started_at_ms=job['started_at_ms'], duration_ms=duration,
+                               utc_offset_minutes=offset,
+                               telemetry_status='available' if ap else ('no_ap' if frames else 'no_sei'),
+                               ap_segments=ap, event=job['event'],
+                               telemetry=telemetry_samples(frames, duration))
+                encoded = canonical(payload)
+                if pending + 1 > MAX_PENDING or size + len(encoded) > MAX_BYTES:
+                    progress(db, job['clip_id'], 'waiting', detail='backpressure', clock=clock)
+                    stats['backpressure'] = True
+                    break
+                with db:
+                    db.execute('INSERT OR REPLACE INTO clips '
+                               '(clip_id,signature,revision,payload,pending,updated_at,quality,status) '
+                               'VALUES (?,?,?,?,1,?,?,?)',
+                               (job['clip_id'], job['signature'], payload['revision'], encoded,
+                                clock(), job['quality'], payload['telemetry_status']))
+                    db.execute('DELETE FROM failures WHERE clip_id=?', (job['clip_id'],))
+                pending += 1
+                size += len(encoded)
+                progress(db, job['clip_id'], 'queued', detail=payload['telemetry_status'], clock=clock)
+                stats['queued'] += 1
+                stats[job['quality']] += 1
+            except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+                mark_failed(db, job['clip_id'], exc, clock)
+                stats['failed'] += 1
     return stats
 
 
 def prune(db, archive):
-    alive = {clip_id for clip_id, _, _ in discover(archive)}
+    alive = {clip_id for clip_id, _cat, _stamp, _files in discover(archive)}
     with db:
         for (clip_id,) in db.execute('SELECT clip_id FROM clips WHERE pending=0 AND updated_at < ?', (time.time() - 7 * 86400,)).fetchall():
             if clip_id not in alive:
@@ -586,13 +731,24 @@ def main(argv=None):
             if error and error != previous_error:
                 print('Upload deferred: ' + error, flush=True)
             previous_error = error
+            # 还有活干就尽快进入下一轮; 只有确实无事可做时才睡满 10 秒。
+            if stats.get('queued') or stats.get('more'):
+                delay = 1
+            refine_pending = db.execute(
+                "SELECT count(*) FROM clips WHERE pending=0 AND quality='coarse' AND status<>'no_sei'").fetchone()[0]
             with db:
                 # 解析窗口和录像时区只有上传器知道: 查看器据此区分"还会被扫"和"已经错过窗口".
                 for key, value in dict(last_cycle=str(int(time.time())), last_error=error,
                                        extraction_failures=str(stats['failed']), backpressure=str(stats['backpressure']),
                                        next_upload_at=str(int(next_upload)),
                                        utc_offset_minutes=str(offset),
-                                       parse_window_seconds=str(PARSE_WINDOW_SECONDS)).items():
+                                       parse_window_seconds=str(PARSE_WINDOW_SECONDS),
+                                       long_window_seconds=str(LONG_WINDOW_SECONDS),
+                                       scan_coarse=str(stats.get('coarse', 0)),
+                                       scan_dense=str(stats.get('dense', 0)),
+                                       scan_skipped=str(stats.get('skipped', 0)),
+                                       scan_seconds=str(stats.get('seconds', 0)),
+                                       refine_pending=str(refine_pending)).items():
                     db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', (key, value))
             if time.time() - last_prune > 3600:
                 prune(db, args.archive)

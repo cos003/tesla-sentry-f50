@@ -12,6 +12,7 @@ import hmac
 import hashlib
 import importlib.util
 import shutil
+import signal
 import struct
 import sqlite3
 from contextlib import closing
@@ -199,7 +200,7 @@ def wifi_connect_worker(iface, ssid, password, key_mgmt):
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.17"
+APP_VERSION = "2.6.0"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -1551,9 +1552,9 @@ function dheadLabel(d) {
 /* Per timestamp group: cameras share one telemetry upload. */
 const syncStatusCache=new Map();
 function applySyncStatus(node,entry){node.textContent=entry.text;node.dataset.phase=entry.phase;node.title=entry.title;node.dataset.retry=entry.phase==='upload_failed'?'1':'';}
-function syncBadge(id,stamp) {
+function syncBadge(id,stamp,cat) {
   const el=document.createElement('span'); el.className='sync-badge';
-  if(id){el.dataset.syncId=id;if(stamp)el.dataset.syncStamp=stamp;el.textContent='同步状态读取中';const cached=syncStatusCache.get(id);if(cached)applySyncStatus(el,cached);}
+  if(id){el.dataset.syncId=id;if(stamp)el.dataset.syncStamp=stamp;el.dataset.syncCat=cat||'';el.textContent='同步状态读取中';const cached=syncStatusCache.get(id);if(cached)applySyncStatus(el,cached);}
   else el.textContent='不符合扫描命名';
   return el;
 }
@@ -1563,22 +1564,22 @@ async function refreshSyncStatus(){
   const nodes=[...document.querySelectorAll('[data-sync-id]')];
   const now=Date.now();
   const visible=nodes.filter(node=>{const r=node.getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>=0&&r.top<=innerHeight&&r.right>=0&&r.left<=innerWidth;});
-  const stampOf=new Map();visible.forEach(n=>{if(n.dataset.syncStamp)stampOf.set(n.dataset.syncId,n.dataset.syncStamp);});
+  const stampOf=new Map(),catOf=new Map();visible.forEach(n=>{if(n.dataset.syncStamp)stampOf.set(n.dataset.syncId,n.dataset.syncStamp);if(n.dataset.syncCat)catOf.set(n.dataset.syncId,n.dataset.syncCat);});
   const ids=[...new Set(visible.map(n=>n.dataset.syncId))].filter(id=>{
     const entry=syncStatusCache.get(id);
     const ttl=entry?.phase==='uploaded'||entry?.phase==='expired'?300000:['parsing','queued','uploading'].includes(entry?.phase)?3000:30000;
     return !entry||now-entry.checkedAt>=ttl;
   }).sort((a,b)=>(syncStatusCache.get(a)?.checkedAt||0)-(syncStatusCache.get(b)?.checkedAt||0)).slice(0,75);
   if(!ids.length)return;syncStatusBusy=true;
-  const labels={waiting:'待扫描 / 排队中',parsing:'正在解析',queued:'已解析 · 待上传',uploading:'正在上传',uploaded:'上传成功',parse_failed:'解析失败 · 待重试',upload_failed:'上传失败 · 待重试',interrupted:'处理中断 · 待重试',expired:'积压老视频不扫'};
+  const labels={waiting:'待扫描 / 排队中',parsing:'正在解析',refining:'窗口外精扫中',queued:'已解析 · 待上传',uploading:'正在上传',uploaded:'上传成功',parse_failed:'解析失败 · 待重试',upload_failed:'上传失败 · 待重试',interrupted:'处理中断 · 待重试',expired:'积压老视频不扫'};
   try{for(let i=0;i<ids.length;i+=75){const batch=ids.slice(i,i+75);try{
     const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
-    let data;try{const res=await fetch('/api/cloud/status?ids='+batch.join(',')+'&stamps='+batch.map(id=>stampOf.get(id)||'').join(','),{signal:controller.signal,cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);data=await res.json();}finally{clearTimeout(timeout);}
+    let data;try{const res=await fetch('/api/cloud/status?ids='+batch.join(',')+'&stamps='+batch.map(id=>stampOf.get(id)||'').join(',')+'&cats='+batch.map(id=>catOf.get(id)||'').join(','),{signal:controller.signal,cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);data=await res.json();}finally{clearTimeout(timeout);}
     for(const node of document.querySelectorAll('[data-sync-id]')){if(!batch.includes(node.dataset.syncId))continue;
       const status=data.clips[node.dataset.syncId];
       if(!data.available){node.textContent=data.reason==='no_queue'?'同步未初始化':'同步状态不可读';node.dataset.phase='unknown';node.title='没有可用的上传队列信息，无法判断是否已上传';continue;}
       const phase=status?.phase||'waiting';node.dataset.phase=phase;node.dataset.retry=phase==='upload_failed'?'1':'';node.textContent=(labels[phase]||'同步状态未知')+((phase==='upload_failed'||phase==='parse_failed')&&status?.detail?' · '+status.detail:'')+(phase==='upload_failed'?' · 点击重试':'');
-      const win=Math.round(+(data.parse_window_seconds||0)/60);const why=phase==='expired'?('录制时间早于自动解析窗口'+(win>0?'（'+win+' 分钟）':'')+'，上传器只解析新录制的片段，不会补扫历史录像'):'同一时间戳的多路录像共用一份遥测上传';const detail=[ why,status?.source?'解析来源：'+status.source:'',status?.detail||'',status?.updated_at?'更新时间：'+new Date(status.updated_at*1000).toLocaleString():'尚未进入处理记录',data.state?.last_error?'服务最近错误：'+data.state.last_error:'',data.state?.next_upload_at> Date.now()/1000?'上传重试时间：'+new Date(data.state.next_upload_at*1000).toLocaleString():'',!data.tracking?'旧版上传器尚未记录逐片段进度':''];node.title=detail.filter(Boolean).join('\n');
+      const win=Math.round(+(status?.window_seconds||data.parse_window_seconds||0)/60);const why=phase==='expired'?('录制时间早于自动解析窗口'+(win>0?'（'+win+' 分钟）':'')+'，上传器只解析新录制的片段，不会补扫历史录像'):'同一时间戳的多路录像共用一份遥测上传';const quality=status?.quality==='coarse'?'粗扫（离开自动解析窗口后会自动补精扫）':status?.quality==='dense'?'精扫':'';const scan=data.scan&&data.scan.last_cycle?('本轮扫描：粗扫 '+data.scan.coarse+' 段 · 精扫 '+data.scan.dense+' 段 · 超窗不扫 '+data.scan.skipped+' 段'+(data.scan.refine_pending?' · 待精扫 '+data.scan.refine_pending+' 段':'')+(data.scan.seconds?' · 用时 '+data.scan.seconds+' 秒':'')):'';const detail=[ why,status?.telemetry?'遥测结果：'+status.telemetry:'',quality?'扫描精度：'+quality:'',scan,status?.source?'解析来源：'+status.source:'',status?.detail||'',status?.updated_at?'更新时间：'+new Date(status.updated_at*1000).toLocaleString():'尚未进入处理记录',data.state?.last_error?'服务最近错误：'+data.state.last_error:'',data.state?.next_upload_at> Date.now()/1000?'上传重试时间：'+new Date(data.state.next_upload_at*1000).toLocaleString():'',!data.tracking?'旧版上传器尚未记录逐片段进度':''];node.title=detail.filter(Boolean).join('\n');
     }
   }catch(e){for(const node of document.querySelectorAll('[data-sync-id]'))if(batch.includes(node.dataset.syncId)){node.textContent='同步状态获取失败';node.dataset.phase='unknown';node.title=e.message;}}
   finally{for(const node of document.querySelectorAll('[data-sync-id]'))if(batch.includes(node.dataset.syncId))syncStatusCache.set(node.dataset.syncId,{text:node.textContent,phase:node.dataset.phase,title:node.title,checkedAt:Date.now()});}}}
@@ -1657,7 +1658,7 @@ function render(cat) {
     const statusRow=document.createElement('div');statusRow.className='sync-status-row';
     for(const group of groups){const wrap=document.createElement('span');
       if(groups.length>1){const tm=document.createElement('small');tm.textContent=(group.key.split('_')[1]||group.key).replace(/-/g,':')+' ';wrap.append(tm);}
-      wrap.append(syncBadge(group.vids[0]?.sync_id,group.key));statusRow.append(wrap);}
+      wrap.append(syncBadge(group.vids[0]?.sync_id,group.key,cat));statusRow.append(wrap);}
     card.querySelector('.meta').append(statusRow);
     card.onclick = () => openPlayer(ev);
     g.appendChild(card);
@@ -1732,7 +1733,7 @@ function renderClip() {
     vid.setAttribute('webkit-playsinline', ''); vid.setAttribute('x5-playsinline', '');
     const lb = document.createElement('span'); lb.className = 'clabel'; lb.textContent = camShort(v.cam);
     cell.appendChild(vid); cell.appendChild(cl); cell.appendChild(lb);
-    const status=syncBadge(v.sync_id,clip.key);status.classList.add('camera-sync');cell.append(status);
+    const status=syncBadge(v.sync_id,clip.key,currentCat);status.classList.add('camera-sync');cell.append(status);
     cell.onclick = () => focusCell(cell);
     vg.appendChild(cell);
   });
@@ -1755,9 +1756,9 @@ function renderClip() {
     cb.classList.remove('show');
     cb.innerHTML = '';
   }
-  [...cb.querySelectorAll('button')].forEach((button,i)=>{button.append(document.createElement('br'),syncBadge(curClips[i].vids[0]?.sync_id,curClips[i].key));});
+  [...cb.querySelectorAll('button')].forEach((button,i)=>{button.append(document.createElement('br'),syncBadge(curClips[i].vids[0]?.sync_id,curClips[i].key,currentCat));});
   const sub=document.getElementById('ic-sub');
-  sub.append(document.createTextNode(' · '),syncBadge(clip.vids[0]?.sync_id,clip.key));
+  sub.append(document.createTextNode(' · '),syncBadge(clip.vids[0]?.sync_id,clip.key,currentCat));
   refreshSyncStatus();
   const md = ev.meta || {};
   let rh = '';
@@ -3035,13 +3036,15 @@ def clip_age_seconds(stamp, offset):
     return time.time() - recorded.replace(tzinfo=datetime.timezone(datetime.timedelta(minutes=offset))).timestamp()
 
 
-def cloud_clip_status(ids, stamps=None):
+def cloud_clip_status(ids, stamps=None, cats=None):
     """Read only public queue metadata; never load payloads or device credentials.
 
     stamps maps clip_id to its YYYY-MM-DD_HH-MM-SS recording stamp, so a clip that already
     missed the uploader's parse window can be reported as never-to-be-scanned instead of queued.
+    cats maps clip_id to its archive category: RecentClips keeps a longer parse window than the
+    event categories, so the age guess must not use one window for both.
     """
-    stamps = stamps or {}
+    stamps, cats = stamps or {}, cats or {}
     path = os.environ.get("TSF_CLOUD_STATE", "/var/lib/tesla-sentry-cloud/queue.sqlite")
     if not os.path.isfile(path):
         return {"available": False, "reason": "no_queue", "clips": {}}
@@ -3049,44 +3052,63 @@ def cloud_clip_status(ids, stamps=None):
         with closing(sqlite3.connect("file:" + urllib.parse.quote(os.path.realpath(path), safe="/") + "?mode=ro", uri=True, timeout=1)) as db:
             db.row_factory = sqlite3.Row
             marks = ','.join('?' for _ in ids)
+            columns = {r[1] for r in db.execute("PRAGMA table_info(clips)")}
+            extra = ''.join(',' + c for c in ('quality', 'status') if c in columns)
             rows = {r['clip_id']: dict(r) for r in db.execute(
-                'SELECT clip_id,pending,updated_at FROM clips WHERE clip_id IN (' + marks + ')', ids)}
+                'SELECT clip_id,pending,updated_at' + extra + ' FROM clips WHERE clip_id IN (' + marks + ')', ids)}
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             tracked = {r['clip_id']: dict(r) for r in db.execute(
                 'SELECT clip_id,phase,updated_at,source,detail FROM progress WHERE clip_id IN (' + marks + ')', ids)} if 'progress' in tables else {}
             failures = {r['clip_id']: r['retry_at'] for r in db.execute(
                 'SELECT clip_id,retry_at FROM failures WHERE clip_id IN (' + marks + ')', ids)}
-            state = dict(db.execute("SELECT key,value FROM state WHERE key IN ('last_cycle','last_error','next_upload_at','backpressure','utc_offset_minutes','parse_window_seconds')"))
+            state = dict(db.execute("SELECT key,value FROM state WHERE key IN ('last_cycle','last_error','next_upload_at','backpressure','utc_offset_minutes',"
+                                    "'parse_window_seconds','long_window_seconds','scan_coarse','scan_dense','scan_skipped','scan_seconds','refine_pending')"))
             try:
                 offset = int(state['utc_offset_minutes'])
                 window = int(state['parse_window_seconds'])
             except (KeyError, TypeError, ValueError):
                 offset = window = None  # older uploader: no window published, keep the plain waiting label
+            try:
+                long_window = int(state['long_window_seconds'])
+            except (KeyError, TypeError, ValueError):
+                long_window = None  # older uploader: every category keeps the same short window
+            scan = {"last_cycle": state.get('last_cycle'), "coarse": _int_or_zero(state.get('scan_coarse')),
+                    "dense": _int_or_zero(state.get('scan_dense')), "skipped": _int_or_zero(state.get('scan_skipped')),
+                    "seconds": _int_or_zero(state.get('scan_seconds')), "refine_pending": _int_or_zero(state.get('refine_pending'))}
             result = {}
             for key in ids:
                 row, track = rows.get(key), tracked.get(key)
                 phase = 'waiting'
                 if track:
                     phase = track['phase']
-                    if phase in ('parsing', 'uploading') and time.time() - track['updated_at'] > 900:
+                    if phase in ('parsing', 'refining', 'uploading') and time.time() - track['updated_at'] > 900:
                         phase = 'interrupted'
                 if row and not row['pending'] and (not track or track['updated_at'] <= row['updated_at'] or phase == 'uploaded'):
                     phase = 'uploaded'
-                elif row and row['pending'] and phase not in ('parsing','parse_failed','uploading','upload_failed','interrupted'):
+                elif row and row['pending'] and phase not in ('parsing', 'refining', 'parse_failed', 'uploading', 'upload_failed', 'interrupted'):
                     phase = 'queued'
                 elif not track and key in failures:
                     phase = 'parse_failed'
-                if phase == 'waiting' and window is not None:
+                limit = long_window if cats.get(key) in ('RecentClips', 'SavedClips') and long_window is not None else window
+                if phase == 'waiting' and limit is not None:
                     age = clip_age_seconds(stamps.get(key), offset)
-                    if age is not None and age > window:
+                    if age is not None and age > limit:
                         phase = 'expired'  # recording missed the window: the uploader will never scan it
                 result[key] = {"phase": phase, "updated_at": (track or row or {}).get('updated_at'),
                                "detail": track['detail'] if track else '', "source": track['source'] if track else '',
-                               "retry_at": failures.get(key)}
+                               "retry_at": failures.get(key), "window_seconds": limit,
+                               "quality": (row or {}).get('quality') or '', "telemetry": (row or {}).get('status') or ''}
             return {"available": True, "tracking": 'progress' in tables, "state": state,
-                    "parse_window_seconds": window, "clips": result}
+                    "parse_window_seconds": window, "long_window_seconds": long_window, "scan": scan, "clips": result}
     except (OSError, sqlite3.Error):
         return {"available": False, "reason": "queue_unreadable", "clips": {}}
+
+
+def _int_or_zero(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def cloud_retry_uploads(ids):
@@ -4530,6 +4552,13 @@ def order_files(names):
 
 
 def probe_duration(path):
+    """时长优先从 moov 读(零进程开销), 读不出来才回退 ffprobe"""
+    try:
+        dur = _mp4_duration(path)
+        if dur > 0:
+            return dur
+    except Exception:
+        pass
     try:
         out = subprocess.run([FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
                               "-of", "default=nw=1:nk=1", path],
@@ -4747,37 +4776,12 @@ def _strip_emulation(b):
     return bytes(out)
 
 
-def _mp4_video_samples(fp, max_samples=4000, trace=None):
-    """解析 moov, 返回 [(offset, size), ...] 与 lenSize; 失败返回 None"""
+def _mp4_moov(fp):
+    """定位并读出 moov 盒内容; 失败返回 None。样本表与时长共用这一次定位。"""
     with open(fp, "rb") as f:
-        d = f.read(4096)
         f.seek(0, 2)
         fsize = f.tell()
-
-    def boxes(buf, start, end):
-        out = []
-        i = start
-        while i + 8 <= end:
-            if i + 8 > len(buf) and len(buf) < fsize:
-                return None  # 需要 moov 全量, 由调用方重新读
-            size = struct.unpack(">I", buf[i:i + 4])[0]
-            typ = buf[i + 4:i + 8]
-            hdr = 8
-            if size == 1:
-                size = struct.unpack(">Q", buf[i + 8:i + 16])[0]
-                hdr = 16
-            elif size == 0:
-                size = end - i
-            if size < hdr:
-                break
-            out.append((typ, i + hdr, i + size))
-            i += size
-        return out
-
-    # moov 可能在文件尾, 先定位
-    with open(fp, "rb") as f:
         pos = 0
-        moov_rng = None
         while pos + 8 <= fsize:
             f.seek(pos)
             hdr = f.read(8)
@@ -4787,33 +4791,86 @@ def _mp4_video_samples(fp, max_samples=4000, trace=None):
             typ = hdr[4:8]
             hsz = 8
             if size == 1:
-                size = struct.unpack(">Q", f.read(8))[0]
+                extra = f.read(8)
+                if len(extra) < 8:
+                    break
+                size = struct.unpack(">Q", extra)[0]
                 hsz = 16
             elif size == 0:
                 size = fsize - pos
             if size < hsz:
                 break
             if typ == b"moov":
-                moov_rng = (pos + hsz, pos + size)
-                break
+                f.seek(pos + hsz)
+                return f.read(size - hsz)  # 整个 moov 一次读全, 后面多次查找都靠它
             pos += size
+    return None
+
+
+def _moov_boxes(buf, start, end):
+    """遍历 buf[start:end] 里的 box, 返回 [(type, payload_start, payload_end)]"""
+    out = []
+    i = start
+    while i + 8 <= end:
+        size = struct.unpack(">I", buf[i:i + 4])[0]
+        typ = buf[i + 4:i + 8]
+        hdr = 8
+        if size == 1:
+            if i + 16 > end:
+                break
+            size = struct.unpack(">Q", buf[i + 8:i + 16])[0]
+            hdr = 16
+        elif size == 0:
+            size = end - i
+        if size < hdr:
+            break
+        out.append((typ, i + hdr, i + size))
+        i += size
+    return out
+
+
+def _mp4_duration(fp, moov=None):
+    """从 moov/mvhd 读时长(秒), 读不出来返回 0.0 —— 免去每段 spawn 一次 ffprobe"""
+    try:
+        moov = moov if moov is not None else _mp4_moov(fp)
+    except (OSError, struct.error):
+        return 0.0
+    if not moov:
+        return 0.0
+    for typ, s, e in _moov_boxes(moov, 0, len(moov)):
+        if typ != b"mvhd" or e - s < 20:
+            continue
+        try:
+            if moov[s] == 1 and e - s >= 32:
+                scale, dur = struct.unpack(">IQ", moov[s + 20:s + 32])
+            else:
+                scale, dur = struct.unpack(">II", moov[s + 12:s + 20])
+        except struct.error:
+            return 0.0
+        return dur / float(scale) if scale and dur else 0.0
+    return 0.0
+
+
+def _mp4_video_samples(fp, max_samples=4000, trace=None):
+    """解析 moov, 返回 [(offset, size), ...] 与 lenSize; 失败返回 None"""
+    try:
+        moov = _mp4_moov(fp)
+    except OSError:
+        moov = None
     if trace is not None:
-        trace["moov_found"] = bool(moov_rng)
-    if not moov_rng:
+        trace["moov_found"] = bool(moov)
+    if not moov:
         return None
-    with open(fp, "rb") as f:
-        f.seek(moov_rng[0])
-        moov = f.read(moov_rng[1] - moov_rng[0])
     mv_s, mv_e = 0, len(moov)
 
     def find1(name, s, e):
-        for typ, cs, ce in boxes(moov, s, e):
+        for typ, cs, ce in _moov_boxes(moov, s, e):
             if typ == name:
                 return cs, ce
         return None
 
     stbl = None
-    for typ, ts, te in boxes(moov, mv_s, mv_e):
+    for typ, ts, te in _moov_boxes(moov, mv_s, mv_e):
         if typ != b"trak":
             continue
         r = find1(b"mdia", ts, te)
@@ -4872,13 +4929,100 @@ def _mp4_video_samples(fp, max_samples=4000, trace=None):
     return offs, len_size
 
 
-def parse_telemetry(fp, stride=3, missing_ap_unknown=False, trace=None):
-    """从 mp4 SEI 提取遥测, 返回 dict 或 None(无SEI)"""
-    r = _mp4_video_samples(fp, trace=trace) if trace is not None else _mp4_video_samples(fp)
+def _tesla_sei(nal):
+    """找特斯拉 SEI 的 magic(连续 0x42 之后遇到 0x69), 返回 protobuf 起点; 不是则 None"""
+    for i in range(3, min(len(nal), 100)):
+        if nal[i] == 0x42:
+            continue
+        if nal[i] == 0x69:
+            return i + 1
+        break
+    return None
+
+
+def _env_int(name, default, low, high):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+# 停车哨兵片段整段没有 SEI, 逐帧全量解析是纯浪费。探测按帧抽样, 命中即停:
+# 命中说明这段在开车(SEI 每帧都有), 再走全量解析; 整段都没有就是 no_sei。
+SEI_PROBE = os.environ.get("TSF_SEI_PROBE", "1") != "0"
+SEI_PROBE_STRIDE = _env_int("TSF_SEI_PROBE_STRIDE", 16, 1, 240)
+SEI_PROBE_BYTES = _env_int("TSF_SEI_PROBE_BYTES", 0, 0, 65536)  # 0=读整帧, >0 只读前 N 字节
+
+
+class _cloud_deadline:
+    """单段硬超时: 一段卡住不能拖住同一批里的其它片段 (仅 POSIX 主线程生效)"""
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.active = False
+
+    def __enter__(self):
+        if hasattr(signal, "setitimer"):
+            try:
+                signal.signal(signal.SIGALRM, self._raise)
+                signal.setitimer(signal.ITIMER_REAL, self.seconds)
+                self.active = True
+            except (ValueError, OSError):
+                self.active = False
+        return self
+
+    def __exit__(self, *_exc):
+        if self.active:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        return False
+
+    @staticmethod
+    def _raise(_signum, _frame):
+        raise TimeoutError("extraction timed out")
+
+
+def _sei_present(fp, offs, len_size, stride=SEI_PROBE_STRIDE, head=SEI_PROBE_BYTES):
+    """稀疏探测: 每 stride 帧检查有没有特斯拉 SEI, 命中立刻返回。只读约 1/stride 的数据。"""
+    try:
+        fsize = os.path.getsize(fp)
+    except OSError:
+        return False
+    try:
+        with open(fp, "rb") as f:
+            for k in range(0, len(offs), stride):
+                o, ln = offs[k]
+                if ln <= 0 or o + ln > fsize:
+                    continue
+                f.seek(o)
+                data = f.read(min(ln, head) if head > 0 else ln)
+                pos = 0
+                while pos + len_size <= len(data):
+                    n = int.from_bytes(data[pos:pos + len_size], "big")
+                    if n <= 0:
+                        break
+                    avail = len(data) - pos - len_size
+                    nal = data[pos + len_size:pos + len_size + min(n, avail)]
+                    if nal and nal[0] & 0x1F == 6 and _tesla_sei(nal) is not None:
+                        return True
+                    if avail < n:
+                        break
+                    pos += len_size + n
+    except OSError:
+        return False
+    return False
+
+
+def parse_telemetry(fp, stride=3, missing_ap_unknown=False, trace=None, samples=None, duration=None):
+    """从 mp4 SEI 提取遥测, 返回 dict 或 None(无SEI)。
+
+    samples/duration 可传入已解析好的样本表与时长, 云提取时同一文件不用读两遍。
+    """
+    r = samples if samples is not None else (_mp4_video_samples(fp, trace=trace) if trace is not None else _mp4_video_samples(fp))
     if not r:
         return None
     offs, len_size = r
-    dur = probe_duration(fp)
+    dur = duration if duration else probe_duration(fp)
     if trace is not None:
         trace.update(duration_s=dur, scanned_samples=0, nal_units=0, sei_units=0, tesla_markers=0, decoded_messages=0, invalid_nal_lengths=0, fields={}, raw_examples=[])
     if not dur or len(offs) < 2:
@@ -4911,14 +5055,7 @@ def parse_telemetry(fp, stride=3, missing_ap_unknown=False, trace=None):
                     continue
                 if trace is not None:
                     trace["sei_units"] += 1
-                # 找 magic: 连续的 0x42 之后遇到 0x69
-                pi = None
-                for i in range(3, min(len(nal), 100)):
-                    if nal[i] == 0x42:
-                        continue
-                    if nal[i] == 0x69:
-                        pi = i + 1
-                    break
+                pi = _tesla_sei(nal)
                 if pi is None:
                     continue
                 if trace is not None:
@@ -4973,6 +5110,19 @@ def parse_telemetry(fp, stride=3, missing_ap_unknown=False, trace=None):
         "frames": frames,
     }
 
+
+
+def cloud_extract(fp, stride=1):
+    """云上传端的一段提取: 探测无 SEI 就直接返回空帧, 有才按 stride 全量解析。"""
+    samples = _mp4_video_samples(fp)
+    duration = _mp4_duration(fp) or probe_duration(fp)
+    if not samples or duration <= 0:
+        raise ValueError("incomplete media")
+    offs, len_size = samples
+    if SEI_PROBE and not _sei_present(fp, offs, len_size):
+        return {"duration": duration, "frames": []}
+    tel = parse_telemetry(fp, stride=stride, missing_ap_unknown=True, samples=samples, duration=duration)
+    return {"duration": tel["duration"] if tel else duration, "frames": tel["frames"] if tel else []}
 
 
 SEI_DIAGNOSTICS_HTML = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SEI 解析诊断</title>
@@ -5450,7 +5600,10 @@ class Handler(BaseHTTPRequestHandler):
             stamps = q.get("stamps", [""])[0].split(',')
             if len(stamps) != len(ids):
                 stamps = [''] * len(ids)  # older page sends no stamps: never guess, just report waiting
-            self._json(cloud_clip_status(ids, dict(zip(ids, stamps))))
+            cats = q.get("cats", [""])[0].split(',')
+            if len(cats) != len(ids):
+                cats = [''] * len(ids)  # older page sends no category: fall back to the event window
+            self._json(cloud_clip_status(ids, dict(zip(ids, stamps)), dict(zip(ids, cats))))
         elif path == "/api/events":
             self._json(list_events())
         elif path == "/api/telemetry":
@@ -6096,20 +6249,39 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     # Read-only extraction for the optional uploader: no server, mounts or gadget changes.
+    # 云上传端的一段或多段提取: --cloud-telemetry PATH... [--cloud-stride N]
+    # 输出每段一行 JSON(带 file 字段), 批量时调用方按路径对齐; 单段时仍是合法 JSON。
     if "--cloud-telemetry" in sys.argv:
-        try:
-            fp = safe_archive_path(sys.argv[sys.argv.index("--cloud-telemetry") + 1])
-            if not fp or not fp.lower().endswith(".mp4"):
-                raise ValueError("invalid archive file")
-            tel = parse_telemetry(fp, stride=1, missing_ap_unknown=True)
-            duration = tel["duration"] if tel else probe_duration(fp)
-            if duration <= 0:
-                raise ValueError("incomplete media")
-            print(json.dumps({"duration": duration, "frames": tel["frames"] if tel else []}))
-            sys.exit(0)
-        except Exception:
+        argv = sys.argv[sys.argv.index("--cloud-telemetry") + 1:]
+        stride, paths, i = 1, [], 0
+        while i < len(argv):
+            if argv[i] == "--cloud-stride" and i + 1 < len(argv):
+                try:
+                    stride = max(1, min(8, int(argv[i + 1])))
+                except ValueError:
+                    stride = 1
+                i += 2
+            else:
+                paths.append(argv[i])
+                i += 1
+        if not paths:
             print("telemetry extraction failed", file=sys.stderr)
             sys.exit(3)
+        per_file = _env_int("TSF_CLOUD_FILE_TIMEOUT", 45 if stride > 1 else 120, 5, 600)
+        failed = 0
+        for raw in paths:
+            try:
+                with _cloud_deadline(per_file):
+                    fp = safe_archive_path(raw)
+                    if not fp or not fp.lower().endswith(".mp4"):
+                        raise ValueError("invalid archive file")
+                    out = cloud_extract(fp, stride)
+                out["file"] = raw
+                print(json.dumps(out, ensure_ascii=False), flush=True)
+            except Exception:
+                failed += 1
+                print(json.dumps({"file": raw, "error": "telemetry extraction failed"}), flush=True)
+        sys.exit(0 if failed < len(paths) else 3)
     # OTA 自检: 只验证模块能完整加载 (常量/函数定义无误), 不启动服务、不碰硬件
     if "--ota-check" in sys.argv:
         print("ok %s" % APP_VERSION)

@@ -1,14 +1,15 @@
 {
-  "version": "2.5.17",
+  "version": "2.6.0",
   "date": "2026-11-16",
   "notes": [
-    "逐片段状态区分积压老视频: 超窗片段显示不扫, 不再误报待扫描",
-    "云同步每组只解析主摄: 停车片段不再把六路都解一遍"
+    "扫描分三级: SEI 探测直接判定停车片段无遥测; 窗口内 1/4 采样粗扫保证不丢; 窗口外空闲时补逐帧精扫",
+    "解析窗口按分类: SentryClips 5 分钟, RecentClips / SavedClips 30 分钟; 按剩余窗口最少优先, 不足 120 秒时一轮多扫几段",
+    "提取器一次进程处理多段、时长改读 moov 不再每段调 ffprobe; 同步状态显示本轮扫描统计与单段扫描精度"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "f31dcf1032e82193f3a6ec77cba7552703257c9d769486de8fb671514ca0fd06",
-    "sentry-cloud-sync.py": "b0896302f022c40a2c54d4a83ffed6595fba15d4d7db3c702bece1fab295a24e",
+    "sentry-viewer.py": "a38992e0ab66d2cd5a0a3b862c27eccd8b6b0cc6fa62d1f13a517c5a91af5fb4",
+    "sentry-cloud-sync.py": "ca4e64c2a95c10055fdf56e767b7bb0afb84224c5bd18e7f940095d7049b3d90",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
     "scripts/install-cloud-sync.sh": "812f9c57ffdd7ae0705cad5f7c67b311c83a56e8ee71138b2b643f59ea4a2d29"
   }

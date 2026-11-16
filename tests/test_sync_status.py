@@ -44,9 +44,9 @@ class StatusTest(unittest.TestCase):
 
     def test_wait_parse_queue_failure_retry_ack_lifecycle(self):
         self.assertEqual(self.status()['phase'], 'waiting')
-        def extract(*args):
+        def extract(archive, viewer, jobs):
             self.assertEqual(self.status()['phase'], 'parsing')
-            return {'duration': 1, 'frames': []}
+            return [{'duration': 1, 'frames': []} for _ in jobs]
         self.collect(extract)
         self.assertEqual(self.status()['phase'], 'queued')
         config = {'server':'https://cloud.test','device_token':'x'*43}
@@ -90,7 +90,7 @@ class StatusTest(unittest.TestCase):
         self.assertEqual([v['sync_id'] for v in videos], [self.key, self.key])
 
     def test_incomplete_ack_never_marks_success(self):
-        self.collect(lambda *_: {'duration': 1, 'frames': []})
+        self.collect(lambda archive, viewer, jobs: [{'duration': 1, 'frames': []} for _ in jobs])
         with self.assertRaises(ValueError):
             sync.upload(self.db, {'server':'https://cloud.test','device_token':'x'*43},
                         sender=lambda *_: {'batch_id':'wrong','accepted':[]})
@@ -98,7 +98,7 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT pending FROM clips').fetchone()[0], 1)
 
     def test_legacy_success_is_visible_without_progress_table(self):
-        self.collect(lambda *_: {'duration': 1, 'frames': []})
+        self.collect(lambda archive, viewer, jobs: [{'duration': 1, 'frames': []} for _ in jobs])
         self.db.execute('DROP TABLE progress')
         self.db.execute('UPDATE clips SET pending=0')
         self.db.commit()
@@ -125,6 +125,49 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(phase('not-a-stamp'), 'waiting')
         sync.progress(self.db, self.key, 'queued')  # a real record always wins over the age guess
         self.assertEqual(phase(old), 'queued')
+
+
+    def test_category_window_quality_and_scan_stats(self):
+        start = sync.dt.datetime.now(sync.dt.timezone(sync.dt.timedelta(hours=8)))
+        fresh = start.strftime('%Y-%m-%d_%H-%M-%S')
+        old = (start - sync.dt.timedelta(minutes=10)).strftime('%Y-%m-%d_%H-%M-%S')
+
+        def phase(stamp, cat):
+            return viewer.cloud_clip_status([self.key], {self.key: stamp}, {self.key: cat})['clips'][self.key]['phase']
+
+        with self.db:
+            self.db.executemany('INSERT OR REPLACE INTO state VALUES (?,?)',
+                                [('utc_offset_minutes', '480'), ('parse_window_seconds', '300'),
+                                 ('long_window_seconds', '1800'), ('last_cycle', '123'),
+                                 ('scan_coarse', '3'), ('scan_dense', '1'), ('scan_skipped', '4'),
+                                 ('scan_seconds', '12'), ('refine_pending', '2')])
+        self.assertEqual(phase(old, 'SentryClips'), 'expired')   # 哨兵事件 5 分钟窗口
+        self.assertEqual(phase(old, 'RecentClips'), 'waiting')    # 连续录像 30 分钟窗口
+        self.assertEqual(phase(old, 'SavedClips'), 'waiting')     # 手动保存同理
+        report = viewer.cloud_clip_status([self.key], {self.key: fresh}, {self.key: 'RecentClips'})
+        self.assertEqual(report['scan'], {'last_cycle': '123', 'coarse': 3, 'dense': 1, 'skipped': 4,
+                                          'seconds': 12, 'refine_pending': 2})
+        self.assertEqual(report['clips'][self.key]['window_seconds'], 1800)
+        self.assertEqual(report['clips'][self.key]['quality'], '')
+
+    def test_queue_from_an_older_uploader_is_still_readable(self):
+        legacy = self.path / 'legacy.sqlite'
+        db = sync.sqlite3.connect(str(legacy))
+        db.executescript("""CREATE TABLE clips (clip_id TEXT PRIMARY KEY, signature TEXT NOT NULL,
+            revision INTEGER NOT NULL, payload TEXT NOT NULL, pending INTEGER NOT NULL DEFAULT 1,
+            updated_at REAL NOT NULL);
+          CREATE TABLE progress (clip_id TEXT PRIMARY KEY, phase TEXT NOT NULL, updated_at REAL NOT NULL,
+            source TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '');
+          CREATE TABLE failures (clip_id TEXT PRIMARY KEY, retry_at REAL NOT NULL);
+          CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL);""")
+        db.execute('INSERT INTO clips VALUES (?,?,?,?,1,?)', (self.key, 'sig', 1, '', time.time()))
+        db.commit()
+        db.close()
+        with mock.patch.dict(os.environ, TSF_CLOUD_STATE=str(legacy)):
+            report = viewer.cloud_clip_status([self.key])
+        self.assertTrue(report['available'])
+        self.assertEqual(report['clips'][self.key]['phase'], 'queued')
+        self.assertEqual(report['clips'][self.key]['quality'], '')
 
 
 if __name__ == '__main__': unittest.main()
