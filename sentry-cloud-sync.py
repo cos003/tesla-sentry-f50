@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '1.4.0'
+VERSION = '1.5.0'
 TELEMETRY_FIELDS = ['offset_ms', 'gear', 'speed_kmh', 'steering_deg', 'turn_signal',
                     'accel_x_mps2', 'accel_y_mps2', 'accel_z_mps2', 'ap_raw_state', 'accelerator_pct', 'brake_pressed']
 LEGACY_FIELDS = TELEMETRY_FIELDS[:9]
@@ -122,10 +122,13 @@ STAMP = re.compile(r'^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$', re.I)
 CATS = ('RecentClips', 'SavedClips', 'SentryClips')
 MAX_PENDING = 10000
 MAX_BYTES = 64 * 1024 * 1024
-# SentryClips 是哨兵事件(以停车为主), 保持 5 分钟窗口就够; RecentClips / SavedClips 是连续录像
-# 和手动保存(多是行车中), 放宽到 30 分钟, 否则哨兵事件一插队, 正在开车的片段就被挤出窗口永久丢掉。
-PARSE_WINDOW_SECONDS = 300
-LONG_WINDOW_SECONDS = 1800
+# 分类扫描策略:
+#   SentryClips  哨兵告警: 停车触发, 整段没有 SEI, 不解析也不上报。
+#   SavedClips   手动保存: 用户主动保存, 一定解析 —— 不设窗口, 不因积压丢弃。
+#   RecentClips  连续录像: 只解析最近 30 分钟, 超窗不补; 窗口内先粗扫, 空闲时补精扫。
+SCAN_CATEGORIES = ('RecentClips', 'SavedClips')
+ALWAYS_CATEGORIES = ('SavedClips',)
+RECENT_WINDOW_SECONDS = 1800
 COARSE_STRIDE = 4          # 窗口内粗扫: 1/4 采样, AP 段仍有 ~150ms 分辨率
 DENSE_STRIDE = 1           # 窗口外补精扫
 COARSE_TIMEOUT = 45        # 窗口内有截止时间, 单段硬超时
@@ -247,9 +250,9 @@ def segments(frames, duration_ms):
     return out
 
 
-def discover(archive):
+def discover(archive, cats=CATS):
     root = Path(archive).resolve()
-    for cat in CATS:
+    for cat in cats:
         base = root / cat
         if not base.is_dir() or base.is_symlink():
             continue
@@ -269,22 +272,30 @@ def discover(archive):
 
 
 def window_seconds(cat):
-    """只有哨兵事件(以停车为主)用短窗口; 连续录像和手动保存(行车中)用长窗口"""
-    return PARSE_WINDOW_SECONDS if cat == 'SentryClips' else LONG_WINDOW_SECONDS
+    """解析窗口(秒); None 表示不设窗口 —— 手动保存一定解析, 不看积压"""
+    return None if cat in ALWAYS_CATEGORIES else RECENT_WINDOW_SECONDS
 
 
-def scan_quality(row, signature, in_window):
+def scan_order(item):
+    """扫描顺序: 快过期的 → 手动保存(新片段优先) → 其余窗口内片段(剩余窗口最少优先)"""
+    left = item['left']
+    if left is not None and left <= URGENT_LEFT_SECONDS:
+        return (0, left, 0)
+    if item['cat'] in ALWAYS_CATEGORIES:
+        return (1, -item['started_at_ms'], 0)
+    return (2, left, 0)
+
+
+def scan_quality(row, signature, allow_dense):
     """这一段本轮该怎么扫: 'coarse' 粗扫 / 'dense' 精扫补全 / None 不扫"""
     if row is None:
-        return 'coarse' if in_window else None          # 历史积压不补扫
+        return 'coarse'                                 # 没扫过: 先粗扫, 保证窗口关闭前有一份
     if row['pending']:
         return None                                     # 不覆盖未确认的修订
     if row['signature'] != signature:
-        return 'coarse' if in_window else None          # 内容变了: 只在窗口内重扫
-    if in_window:
-        return None                                     # 本轮已扫过
-    if row['quality'] == 'coarse' and row['status'] != 'no_sei':
-        return 'dense'                                  # 窗口外补精扫: 只有真读到 SEI 才值得
+        return 'coarse'                                 # 内容变了: 重新粗扫
+    if allow_dense and row['quality'] == 'coarse' and row['status'] != 'no_sei':
+        return 'dense'                                  # 空闲时补精扫: 只有真读到 SEI 才值得
     return None
 
 
@@ -361,7 +372,7 @@ def collect(db, archive, viewer, offset, budget=1, extractor=extract, clock=time
     retry = {row[0]: row[1] for row in db.execute('SELECT clip_id,retry_at FROM failures')}
     started = clock()
     fresh, refine = [], []
-    for clip_id, cat, stamp, files in discover(archive):
+    for clip_id, cat, stamp, files in discover(archive, SCAN_CATEGORIES):
         try:
             recorded = dt.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S').replace(
                 tzinfo=dt.timezone(dt.timedelta(minutes=offset))).timestamp()
@@ -370,20 +381,24 @@ def collect(db, archive, viewer, offset, budget=1, extractor=extract, clock=time
         age = started - recorded
         if age < 0:
             continue           # 片段起始时间在当前时间之后: 时钟肯定不对, 不猜
-        left = window_seconds(cat) - age
+        window = window_seconds(cat)
+        left = None if window is None else window - age
         row = rows.get(clip_id)
-        item = {'clip_id': clip_id, 'files': files, 'left': left,
+        item = {'clip_id': clip_id, 'cat': cat, 'files': files, 'left': left,
                 'started_at_ms': int(recorded * 1000)}
-        if left >= 0:
+        if left is None or left >= 0:
             fresh.append(item)
         elif row is None:
             stats['skipped'] += 1      # 从没扫过又超出窗口: 上传器不会补扫, 与查看器文案一致
-        elif not row['pending'] and row['quality'] == 'coarse' and row['status'] != 'no_sei':
+        if (row and not row['pending'] and row['quality'] == 'coarse' and row['status'] != 'no_sei'
+                and (left is None or left < 0)):
+            # 粗扫过且真读到 SEI: RecentClips 等它出了窗口再补精扫(别在行车途中和粗扫抢算力),
+            # SavedClips 没有窗口, 空闲时随时补。
             refine.append(item)
     # 剩余窗口最小的先扫: 旧代码按时间倒序, 最接近过期的反而排在最后。
-    fresh.sort(key=lambda c: c['left'])
-    refine.sort(key=lambda c: c['started_at_ms'])
-    urgent = sum(1 for c in fresh if c['left'] <= URGENT_LEFT_SECONDS)
+    fresh.sort(key=scan_order)
+    refine.sort(key=lambda c: -c['started_at_ms'])   # 新片段先补精扫
+    urgent = sum(1 for c in fresh if c['left'] is not None and c['left'] <= URGENT_LEFT_SECONDS)
     limit = max(1, min(MAX_CYCLE_CLIPS, budget + urgent))
 
     def prepare(cand, wanted):
@@ -395,7 +410,7 @@ def collect(db, archive, viewer, offset, budget=1, extractor=extract, clock=time
             return None
         event = read_event(cand['files'][0].parent)
         signature = digest(canonical([before, event, 'telemetry-v2']))
-        quality = scan_quality(rows.get(clip_id), signature, cand['left'] >= 0)
+        quality = scan_quality(rows.get(clip_id), signature, wanted == 'dense')
         if quality != wanted:
             return None
         path = cand['files'][0]
@@ -742,8 +757,7 @@ def main(argv=None):
                                        extraction_failures=str(stats['failed']), backpressure=str(stats['backpressure']),
                                        next_upload_at=str(int(next_upload)),
                                        utc_offset_minutes=str(offset),
-                                       parse_window_seconds=str(PARSE_WINDOW_SECONDS),
-                                       long_window_seconds=str(LONG_WINDOW_SECONDS),
+                                       parse_window_seconds=str(RECENT_WINDOW_SECONDS),
                                        scan_coarse=str(stats.get('coarse', 0)),
                                        scan_dense=str(stats.get('dense', 0)),
                                        scan_skipped=str(stats.get('skipped', 0)),

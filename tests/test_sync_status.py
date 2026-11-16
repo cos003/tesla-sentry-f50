@@ -130,24 +130,30 @@ class StatusTest(unittest.TestCase):
     def test_category_window_quality_and_scan_stats(self):
         start = sync.dt.datetime.now(sync.dt.timezone(sync.dt.timedelta(hours=8)))
         fresh = start.strftime('%Y-%m-%d_%H-%M-%S')
-        old = (start - sync.dt.timedelta(minutes=10)).strftime('%Y-%m-%d_%H-%M-%S')
+        ten = (start - sync.dt.timedelta(minutes=10)).strftime('%Y-%m-%d_%H-%M-%S')
+        forty = (start - sync.dt.timedelta(minutes=40)).strftime('%Y-%m-%d_%H-%M-%S')
 
         def phase(stamp, cat):
             return viewer.cloud_clip_status([self.key], {self.key: stamp}, {self.key: cat})['clips'][self.key]['phase']
 
+        def window(cat):
+            return viewer.cloud_clip_status([self.key], {self.key: fresh}, {self.key: cat})['clips'][self.key]['window_seconds']
+
         with self.db:
             self.db.executemany('INSERT OR REPLACE INTO state VALUES (?,?)',
-                                [('utc_offset_minutes', '480'), ('parse_window_seconds', '300'),
-                                 ('long_window_seconds', '1800'), ('last_cycle', '123'),
-                                 ('scan_coarse', '3'), ('scan_dense', '1'), ('scan_skipped', '4'),
-                                 ('scan_seconds', '12'), ('refine_pending', '2')])
-        self.assertEqual(phase(old, 'SentryClips'), 'expired')   # 哨兵事件 5 分钟窗口
-        self.assertEqual(phase(old, 'RecentClips'), 'waiting')    # 连续录像 30 分钟窗口
-        self.assertEqual(phase(old, 'SavedClips'), 'waiting')     # 手动保存同理
+                                [('utc_offset_minutes', '480'), ('parse_window_seconds', '1800'),
+                                 ('last_cycle', '123'), ('scan_coarse', '3'), ('scan_dense', '1'),
+                                 ('scan_skipped', '4'), ('scan_seconds', '12'), ('refine_pending', '2')])
+        self.assertEqual(phase(forty, 'SentryClips'), 'ignored')   # 哨兵告警不解析
+        self.assertEqual(phase(forty, 'RecentClips'), 'expired')   # 连续录像超 30 分钟窗口
+        self.assertEqual(phase(forty, 'SavedClips'), 'waiting')    # 手动保存一定解析, 永不超窗
+        self.assertEqual(phase(ten, 'RecentClips'), 'waiting')
         report = viewer.cloud_clip_status([self.key], {self.key: fresh}, {self.key: 'RecentClips'})
         self.assertEqual(report['scan'], {'last_cycle': '123', 'coarse': 3, 'dense': 1, 'skipped': 4,
                                           'seconds': 12, 'refine_pending': 2})
-        self.assertEqual(report['clips'][self.key]['window_seconds'], 1800)
+        self.assertEqual(window('RecentClips'), 1800)
+        self.assertIsNone(window('SavedClips'))
+        self.assertIsNone(window('SentryClips'))
         self.assertEqual(report['clips'][self.key]['quality'], '')
 
     def test_queue_from_an_older_uploader_is_still_readable(self):

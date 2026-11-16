@@ -200,7 +200,7 @@ def wifi_connect_worker(iface, ssid, password, key_mgmt):
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -1571,7 +1571,7 @@ async function refreshSyncStatus(){
     return !entry||now-entry.checkedAt>=ttl;
   }).sort((a,b)=>(syncStatusCache.get(a)?.checkedAt||0)-(syncStatusCache.get(b)?.checkedAt||0)).slice(0,75);
   if(!ids.length)return;syncStatusBusy=true;
-  const labels={waiting:'待扫描 / 排队中',parsing:'正在解析',refining:'窗口外精扫中',queued:'已解析 · 待上传',uploading:'正在上传',uploaded:'上传成功',parse_failed:'解析失败 · 待重试',upload_failed:'上传失败 · 待重试',interrupted:'处理中断 · 待重试',expired:'积压老视频不扫'};
+  const labels={waiting:'待扫描 / 排队中',parsing:'正在解析',ignored:'哨兵告警不解析',refining:'窗口外精扫中',queued:'已解析 · 待上传',uploading:'正在上传',uploaded:'上传成功',parse_failed:'解析失败 · 待重试',upload_failed:'上传失败 · 待重试',interrupted:'处理中断 · 待重试',expired:'积压老视频不扫'};
   try{for(let i=0;i<ids.length;i+=75){const batch=ids.slice(i,i+75);try{
     const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
     let data;try{const res=await fetch('/api/cloud/status?ids='+batch.join(',')+'&stamps='+batch.map(id=>stampOf.get(id)||'').join(',')+'&cats='+batch.map(id=>catOf.get(id)||'').join(','),{signal:controller.signal,cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);data=await res.json();}finally{clearTimeout(timeout);}
@@ -1579,7 +1579,7 @@ async function refreshSyncStatus(){
       const status=data.clips[node.dataset.syncId];
       if(!data.available){node.textContent=data.reason==='no_queue'?'同步未初始化':'同步状态不可读';node.dataset.phase='unknown';node.title='没有可用的上传队列信息，无法判断是否已上传';continue;}
       const phase=status?.phase||'waiting';node.dataset.phase=phase;node.dataset.retry=phase==='upload_failed'?'1':'';node.textContent=(labels[phase]||'同步状态未知')+((phase==='upload_failed'||phase==='parse_failed')&&status?.detail?' · '+status.detail:'')+(phase==='upload_failed'?' · 点击重试':'');
-      const win=Math.round(+(status?.window_seconds||data.parse_window_seconds||0)/60);const why=phase==='expired'?('录制时间早于自动解析窗口'+(win>0?'（'+win+' 分钟）':'')+'，上传器只解析新录制的片段，不会补扫历史录像'):'同一时间戳的多路录像共用一份遥测上传';const quality=status?.quality==='coarse'?'粗扫（离开自动解析窗口后会自动补精扫）':status?.quality==='dense'?'精扫':'';const scan=data.scan&&data.scan.last_cycle?('本轮扫描：粗扫 '+data.scan.coarse+' 段 · 精扫 '+data.scan.dense+' 段 · 超窗不扫 '+data.scan.skipped+' 段'+(data.scan.refine_pending?' · 待精扫 '+data.scan.refine_pending+' 段':'')+(data.scan.seconds?' · 用时 '+data.scan.seconds+' 秒':'')):'';const detail=[ why,status?.telemetry?'遥测结果：'+status.telemetry:'',quality?'扫描精度：'+quality:'',scan,status?.source?'解析来源：'+status.source:'',status?.detail||'',status?.updated_at?'更新时间：'+new Date(status.updated_at*1000).toLocaleString():'尚未进入处理记录',data.state?.last_error?'服务最近错误：'+data.state.last_error:'',data.state?.next_upload_at> Date.now()/1000?'上传重试时间：'+new Date(data.state.next_upload_at*1000).toLocaleString():'',!data.tracking?'旧版上传器尚未记录逐片段进度':''];node.title=detail.filter(Boolean).join('\n');
+      const win=Math.round(+(status?.window_seconds||data.parse_window_seconds||0)/60);const why=phase==='ignored'?'哨兵告警片段不解析：停车触发没有 SEI，上传器不再读这段视频':(phase==='expired'?('录制时间早于自动解析窗口'+(win>0?'（'+win+' 分钟）':'')+'，上传器只解析新录制的片段，不会补扫历史录像'):'同一时间戳的多路录像共用一份遥测上传');const quality=status?.quality==='coarse'?'粗扫（离开自动解析窗口后会自动补精扫）':status?.quality==='dense'?'精扫':'';const scan=data.scan&&data.scan.last_cycle?('本轮扫描：粗扫 '+data.scan.coarse+' 段 · 精扫 '+data.scan.dense+' 段 · 超窗不扫 '+data.scan.skipped+' 段'+(data.scan.refine_pending?' · 待精扫 '+data.scan.refine_pending+' 段':'')+(data.scan.seconds?' · 用时 '+data.scan.seconds+' 秒':'')):'';const detail=[ why,status?.telemetry?'遥测结果：'+status.telemetry:'',quality?'扫描精度：'+quality:'',scan,status?.source?'解析来源：'+status.source:'',status?.detail||'',status?.updated_at?'更新时间：'+new Date(status.updated_at*1000).toLocaleString():'尚未进入处理记录',data.state?.last_error?'服务最近错误：'+data.state.last_error:'',data.state?.next_upload_at> Date.now()/1000?'上传重试时间：'+new Date(data.state.next_upload_at*1000).toLocaleString():'',!data.tracking?'旧版上传器尚未记录逐片段进度':''];node.title=detail.filter(Boolean).join('\n');
     }
   }catch(e){for(const node of document.querySelectorAll('[data-sync-id]'))if(batch.includes(node.dataset.syncId)){node.textContent='同步状态获取失败';node.dataset.phase='unknown';node.title=e.message;}}
   finally{for(const node of document.querySelectorAll('[data-sync-id]'))if(batch.includes(node.dataset.syncId))syncStatusCache.set(node.dataset.syncId,{text:node.textContent,phase:node.dataset.phase,title:node.title,checkedAt:Date.now()});}}}
@@ -3089,8 +3089,15 @@ def cloud_clip_status(ids, stamps=None, cats=None):
                     phase = 'queued'
                 elif not track and key in failures:
                     phase = 'parse_failed'
-                limit = long_window if cats.get(key) in ('RecentClips', 'SavedClips') and long_window is not None else window
-                if phase == 'waiting' and limit is not None:
+                cat = cats.get(key) or ''
+                # 哨兵告警是停车触发的, 整段没有 SEI, 上传器根本不解析它。
+                # 手动保存是用户主动保存的, 一定解析, 所以永远不判超窗。
+                limit = long_window if cat == 'RecentClips' and long_window is not None else window
+                if phase == 'waiting' and cat == 'SentryClips':
+                    phase, limit = 'ignored', None
+                elif phase == 'waiting' and cat == 'SavedClips':
+                    limit = None
+                elif phase == 'waiting' and limit is not None:
                     age = clip_age_seconds(stamps.get(key), offset)
                     if age is not None and age > limit:
                         phase = 'expired'  # recording missed the window: the uploader will never scan it

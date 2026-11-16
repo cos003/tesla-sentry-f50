@@ -59,9 +59,7 @@ class CloudTest(unittest.TestCase):
             self.db.execute('UPDATE clips SET pending=0')
 
     def test_recording_age_limits_parsing_even_when_mtime_is_recent(self):
-        self.video.unlink()
-        self.add_clip('SentryClips', STAMP)  # 哨兵事件片段保持 5 分钟窗口
-        for age, expected in ((300, 1), (301, 0), (-1, 0)):
+        for age, expected in ((1800, 1), (1801, 0), (-1, 0)):  # RecentClips 窗口 30 分钟
             with self.subTest(age=age):
                 extractor = mock.Mock(side_effect=lambda archive, viewer, jobs: [dict(self.tel) for _ in jobs])
                 self.db.execute('DELETE FROM clips')
@@ -71,17 +69,36 @@ class CloudTest(unittest.TestCase):
                 self.assertEqual(result['queued'], expected)
                 self.assertEqual(extractor.call_count, expected)
 
-    def test_driving_categories_keep_a_longer_window_than_sentry_events(self):
+    def test_sentry_alert_clips_are_never_parsed(self):
         self.video.unlink()
-        self.add_clip('RecentClips', '2026-01-01_07-50-00')   # 10 分钟前, 连续录像
-        self.add_clip('SavedClips', '2026-01-01_07-50-00')    # 10 分钟前, 手动保存(行车中)
-        self.add_clip('SentryClips', '2026-01-01_07-50-00')   # 10 分钟前, 哨兵事件(停车)
-        self.assertEqual(self.collect()['queued'], 1)
-        self.assertEqual(self.collect()['queued'], 1)   # 两个长窗口分类都会扫
-        self.assertEqual(self.collect()['queued'], 0)
-        self.assertEqual(self.db.execute('SELECT count(*) FROM clips').fetchone()[0], 2)
-        for (payload,) in self.db.execute('SELECT payload FROM clips').fetchall():
-            self.assertEqual(json.loads(payload)['started_at_ms'], 1767225000000)  # 07:50 at UTC+8
+        folder = self.archive / 'SentryClips' / '2026-01-01_07-59-00'
+        folder.mkdir(parents=True)
+        (folder / 'event.json').write_text(json.dumps({'reason': 'sentry_aware_object_detection'}), encoding='utf-8')
+        self.add_clip('SentryClips', '2026-01-01_07-59-00')
+        calls = []
+        def extractor(archive, viewer, jobs):
+            calls.extend(jobs)
+            return [dict(self.tel) for _ in jobs]
+        result = self.collect(extractor=extractor)
+        self.assertEqual(result['queued'], 0)
+        self.assertEqual(calls, [])          # 停车告警不读视频
+        self.assertEqual(self.db.execute('SELECT count(*) FROM clips').fetchone()[0], 0)
+
+    def test_saved_clips_are_parsed_no_matter_how_old(self):
+        self.video.unlink()
+        self.add_clip('SavedClips', '2025-12-20_07-00-00')  # 十几天前的手动保存
+        result = self.collect()
+        self.assertEqual(result['queued'], 1)   # 无视积压
+        self.assertEqual(result['skipped'], 0)
+
+    def test_saved_clip_is_scanned_before_a_routine_recent_clip(self):
+        self.add_clip('SavedClips', '2026-01-01_07-58-00')
+        seen = []
+        def extractor(archive, viewer, jobs):
+            seen.extend(Path(job[0]).name for job in jobs)
+            return [dict(self.tel) for _ in jobs]
+        self.collect(extractor=extractor)
+        self.assertEqual(seen, ['2026-01-01_07-58-00-front.mp4'])
 
     def test_oldest_in_window_clip_is_scanned_first(self):
         self.add_clip('RecentClips', '2026-01-01_07-57-00')
@@ -96,10 +113,9 @@ class CloudTest(unittest.TestCase):
 
     def test_near_deadline_cycle_scans_more_than_one_clip(self):
         self.video.unlink()
-        for minute in ('07-59-00', '07-58-00', '07-57-00'):  # 哨兵事件, 剩余窗口 120/60/0 秒
-            self.add_clip('SentryClips', '2026-01-01_' + minute)
-        result = self.collect(clock=lambda: FIXED + 120)
-        self.assertGreaterEqual(result['queued'], 1)
+        for minute in ('07-33-00', '07-32-00', '07-31-00'):  # 窗口剩 120/60/0 秒
+            self.add_clip('RecentClips', '2026-01-01_' + minute)
+        result = self.collect(clock=lambda: FIXED + 60)
         self.assertEqual(result['queued'], 3)  # budget=1 + 三段都进入紧急区
         self.assertFalse(result['more'])
 
@@ -343,8 +359,7 @@ class CloudTest(unittest.TestCase):
         self.assertEqual(state['scan_coarse'], '1')
         self.assertEqual(state['scan_skipped'], '2')
         self.assertEqual(state['scan_seconds'], '3.5')
-        self.assertEqual(state['parse_window_seconds'], '300')
-        self.assertEqual(state['long_window_seconds'], '1800')
+        self.assertEqual(state['parse_window_seconds'], '1800')
         self.assertIn('refine_pending', state)
 
 

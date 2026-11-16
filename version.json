@@ -1,15 +1,15 @@
 {
-  "version": "2.6.0",
+  "version": "2.7.0",
   "date": "2026-11-16",
   "notes": [
-    "扫描分三级: SEI 探测直接判定停车片段无遥测; 窗口内 1/4 采样粗扫保证不丢; 窗口外空闲时补逐帧精扫",
-    "解析窗口按分类: SentryClips 5 分钟, RecentClips / SavedClips 30 分钟; 按剩余窗口最少优先, 不足 120 秒时一轮多扫几段",
-    "提取器一次进程处理多段、时长改读 moov 不再每段调 ffprobe; 同步状态显示本轮扫描统计与单段扫描精度"
+    "哨兵告警(SentryClips)不解析: 停车告警没有 SEI, 上传器不再读这段视频, 卡片显示「哨兵告警不解析」",
+    "手动保存(SavedClips)一定解析: 不设解析窗口、不受积压影响, 空闲时自动补逐帧精扫",
+    "扫描顺序改为 快过期 → 手动保存(新的优先) → 其余窗口内片段; 连续录像窗口统一 30 分钟"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "a38992e0ab66d2cd5a0a3b862c27eccd8b6b0cc6fa62d1f13a517c5a91af5fb4",
-    "sentry-cloud-sync.py": "ca4e64c2a95c10055fdf56e767b7bb0afb84224c5bd18e7f940095d7049b3d90",
+    "sentry-viewer.py": "2a8f8eb2e16cb8c59777f9365aee612e51935eab2274fee5f4f5ed806dda1e00",
+    "sentry-cloud-sync.py": "3becac67a4ca280a6079fa6aacf6ef897d50dfa8408a9548b15cf3cd1b9dc454",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
     "scripts/install-cloud-sync.sh": "812f9c57ffdd7ae0705cad5f7c67b311c83a56e8ee71138b2b643f59ea4a2d29"
   }
