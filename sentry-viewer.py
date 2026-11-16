@@ -199,7 +199,7 @@ def wifi_connect_worker(iface, ssid, password, key_mgmt):
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.5.16"
+APP_VERSION = "2.5.17"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -761,7 +761,7 @@ html[data-theme="light"] .tab.active { background:#17191c; color:#fff; }
 .qhint { font-size:12px; color:var(--amber); flex:0 0 100%; text-align:left; display:none; }
 .empty { text-align:center; padding:80px 20px; color:var(--muted2); }
 .empty .big { font-size:44px; margin-bottom:14px; }
-.vcell .camera-sync{position:absolute;left:7px;bottom:7px;background:rgba(10,16,24,.86);pointer-events:none}.sync-status-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.sync-status-row>span{display:inline-flex;align-items:center;gap:3px}.sync-badge{display:inline-block;font-size:11px;line-height:1.5;border:1px solid #7e8a9b66;border-radius:6px;padding:2px 6px;color:#8b9aaf;background:#8190a015}.sync-badge[data-phase="uploaded"]{color:#28ad79;border-color:#28ad7970}.sync-badge[data-phase="parsing"],.sync-badge[data-phase="uploading"]{color:#438ee9;border-color:#438ee970}.sync-badge[data-phase="queued"]{color:#ba8b24;border-color:#ba8b2470}.sync-badge[data-phase="parse_failed"],.sync-badge[data-phase="upload_failed"],.sync-badge[data-phase="interrupted"]{color:#e16464;border-color:#e1646470}.sync-badge[data-retry="1"]{cursor:pointer;pointer-events:auto}
+.vcell .camera-sync{position:absolute;left:7px;bottom:7px;background:rgba(10,16,24,.86);pointer-events:none}.sync-status-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.sync-status-row>span{display:inline-flex;align-items:center;gap:3px}.sync-badge{display:inline-block;font-size:11px;line-height:1.5;border:1px solid #7e8a9b66;border-radius:6px;padding:2px 6px;color:#8b9aaf;background:#8190a015}.sync-badge[data-phase="uploaded"]{color:#28ad79;border-color:#28ad7970}.sync-badge[data-phase="parsing"],.sync-badge[data-phase="uploading"]{color:#438ee9;border-color:#438ee970}.sync-badge[data-phase="queued"]{color:#ba8b24;border-color:#ba8b2470}.sync-badge[data-phase="parse_failed"],.sync-badge[data-phase="upload_failed"],.sync-badge[data-phase="interrupted"]{color:#e16464;border-color:#e1646470}.sync-badge[data-phase="expired"]{color:#7d8894;border-style:dashed;border-color:#7d889455}.sync-badge[data-retry="1"]{cursor:pointer;pointer-events:auto}
 /* 设置面板 */
 .mask { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:200; }
 .mask.open { display:block; }
@@ -1551,9 +1551,9 @@ function dheadLabel(d) {
 /* Per timestamp group: cameras share one telemetry upload. */
 const syncStatusCache=new Map();
 function applySyncStatus(node,entry){node.textContent=entry.text;node.dataset.phase=entry.phase;node.title=entry.title;node.dataset.retry=entry.phase==='upload_failed'?'1':'';}
-function syncBadge(id) {
+function syncBadge(id,stamp) {
   const el=document.createElement('span'); el.className='sync-badge';
-  if(id){el.dataset.syncId=id;el.textContent='同步状态读取中';const cached=syncStatusCache.get(id);if(cached)applySyncStatus(el,cached);}
+  if(id){el.dataset.syncId=id;if(stamp)el.dataset.syncStamp=stamp;el.textContent='同步状态读取中';const cached=syncStatusCache.get(id);if(cached)applySyncStatus(el,cached);}
   else el.textContent='不符合扫描命名';
   return el;
 }
@@ -1563,21 +1563,22 @@ async function refreshSyncStatus(){
   const nodes=[...document.querySelectorAll('[data-sync-id]')];
   const now=Date.now();
   const visible=nodes.filter(node=>{const r=node.getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>=0&&r.top<=innerHeight&&r.right>=0&&r.left<=innerWidth;});
+  const stampOf=new Map();visible.forEach(n=>{if(n.dataset.syncStamp)stampOf.set(n.dataset.syncId,n.dataset.syncStamp);});
   const ids=[...new Set(visible.map(n=>n.dataset.syncId))].filter(id=>{
     const entry=syncStatusCache.get(id);
-    const ttl=entry?.phase==='uploaded'?300000:['parsing','queued','uploading'].includes(entry?.phase)?3000:30000;
+    const ttl=entry?.phase==='uploaded'||entry?.phase==='expired'?300000:['parsing','queued','uploading'].includes(entry?.phase)?3000:30000;
     return !entry||now-entry.checkedAt>=ttl;
   }).sort((a,b)=>(syncStatusCache.get(a)?.checkedAt||0)-(syncStatusCache.get(b)?.checkedAt||0)).slice(0,75);
   if(!ids.length)return;syncStatusBusy=true;
-  const labels={waiting:'待扫描 / 排队中',parsing:'正在解析',queued:'已解析 · 待上传',uploading:'正在上传',uploaded:'上传成功',parse_failed:'解析失败 · 待重试',upload_failed:'上传失败 · 待重试',interrupted:'处理中断 · 待重试'};
+  const labels={waiting:'待扫描 / 排队中',parsing:'正在解析',queued:'已解析 · 待上传',uploading:'正在上传',uploaded:'上传成功',parse_failed:'解析失败 · 待重试',upload_failed:'上传失败 · 待重试',interrupted:'处理中断 · 待重试',expired:'积压老视频不扫'};
   try{for(let i=0;i<ids.length;i+=75){const batch=ids.slice(i,i+75);try{
     const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
-    let data;try{const res=await fetch('/api/cloud/status?ids='+batch.join(','),{signal:controller.signal,cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);data=await res.json();}finally{clearTimeout(timeout);}
+    let data;try{const res=await fetch('/api/cloud/status?ids='+batch.join(',')+'&stamps='+batch.map(id=>stampOf.get(id)||'').join(','),{signal:controller.signal,cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);data=await res.json();}finally{clearTimeout(timeout);}
     for(const node of document.querySelectorAll('[data-sync-id]')){if(!batch.includes(node.dataset.syncId))continue;
       const status=data.clips[node.dataset.syncId];
       if(!data.available){node.textContent=data.reason==='no_queue'?'同步未初始化':'同步状态不可读';node.dataset.phase='unknown';node.title='没有可用的上传队列信息，无法判断是否已上传';continue;}
       const phase=status?.phase||'waiting';node.dataset.phase=phase;node.dataset.retry=phase==='upload_failed'?'1':'';node.textContent=(labels[phase]||'同步状态未知')+((phase==='upload_failed'||phase==='parse_failed')&&status?.detail?' · '+status.detail:'')+(phase==='upload_failed'?' · 点击重试':'');
-      const detail=[ '同一时间戳的多路录像共用一份遥测上传',status?.source?'解析来源：'+status.source:'',status?.detail||'',status?.updated_at?'更新时间：'+new Date(status.updated_at*1000).toLocaleString():'尚未进入处理记录',data.state?.last_error?'服务最近错误：'+data.state.last_error:'',data.state?.next_upload_at> Date.now()/1000?'上传重试时间：'+new Date(data.state.next_upload_at*1000).toLocaleString():'',!data.tracking?'旧版上传器尚未记录逐片段进度':''];node.title=detail.filter(Boolean).join('\n');
+      const win=Math.round(+(data.parse_window_seconds||0)/60);const why=phase==='expired'?('录制时间早于自动解析窗口'+(win>0?'（'+win+' 分钟）':'')+'，上传器只解析新录制的片段，不会补扫历史录像'):'同一时间戳的多路录像共用一份遥测上传';const detail=[ why,status?.source?'解析来源：'+status.source:'',status?.detail||'',status?.updated_at?'更新时间：'+new Date(status.updated_at*1000).toLocaleString():'尚未进入处理记录',data.state?.last_error?'服务最近错误：'+data.state.last_error:'',data.state?.next_upload_at> Date.now()/1000?'上传重试时间：'+new Date(data.state.next_upload_at*1000).toLocaleString():'',!data.tracking?'旧版上传器尚未记录逐片段进度':''];node.title=detail.filter(Boolean).join('\n');
     }
   }catch(e){for(const node of document.querySelectorAll('[data-sync-id]'))if(batch.includes(node.dataset.syncId)){node.textContent='同步状态获取失败';node.dataset.phase='unknown';node.title=e.message;}}
   finally{for(const node of document.querySelectorAll('[data-sync-id]'))if(batch.includes(node.dataset.syncId))syncStatusCache.set(node.dataset.syncId,{text:node.textContent,phase:node.dataset.phase,title:node.title,checkedAt:Date.now()});}}}
@@ -1656,7 +1657,7 @@ function render(cat) {
     const statusRow=document.createElement('div');statusRow.className='sync-status-row';
     for(const group of groups){const wrap=document.createElement('span');
       if(groups.length>1){const tm=document.createElement('small');tm.textContent=(group.key.split('_')[1]||group.key).replace(/-/g,':')+' ';wrap.append(tm);}
-      wrap.append(syncBadge(group.vids[0]?.sync_id));statusRow.append(wrap);}
+      wrap.append(syncBadge(group.vids[0]?.sync_id,group.key));statusRow.append(wrap);}
     card.querySelector('.meta').append(statusRow);
     card.onclick = () => openPlayer(ev);
     g.appendChild(card);
@@ -1731,7 +1732,7 @@ function renderClip() {
     vid.setAttribute('webkit-playsinline', ''); vid.setAttribute('x5-playsinline', '');
     const lb = document.createElement('span'); lb.className = 'clabel'; lb.textContent = camShort(v.cam);
     cell.appendChild(vid); cell.appendChild(cl); cell.appendChild(lb);
-    const status=syncBadge(v.sync_id);status.classList.add('camera-sync');cell.append(status);
+    const status=syncBadge(v.sync_id,clip.key);status.classList.add('camera-sync');cell.append(status);
     cell.onclick = () => focusCell(cell);
     vg.appendChild(cell);
   });
@@ -1754,9 +1755,9 @@ function renderClip() {
     cb.classList.remove('show');
     cb.innerHTML = '';
   }
-  [...cb.querySelectorAll('button')].forEach((button,i)=>{button.append(document.createElement('br'),syncBadge(curClips[i].vids[0]?.sync_id));});
+  [...cb.querySelectorAll('button')].forEach((button,i)=>{button.append(document.createElement('br'),syncBadge(curClips[i].vids[0]?.sync_id,curClips[i].key));});
   const sub=document.getElementById('ic-sub');
-  sub.append(document.createTextNode(' · '),syncBadge(clip.vids[0]?.sync_id));
+  sub.append(document.createTextNode(' · '),syncBadge(clip.vids[0]?.sync_id,clip.key));
   refreshSyncStatus();
   const md = ev.meta || {};
   let rh = '';
@@ -3023,8 +3024,24 @@ def cloud_enroll_once(code):
         _CLOUD_ENROLL_LOCK.release()
 
 
-def cloud_clip_status(ids):
-    """Read only public queue metadata; never load payloads or device credentials."""
+def clip_age_seconds(stamp, offset):
+    """Seconds since the clip started recording, or None when it cannot be judged locally."""
+    if type(offset) is not int or not re.fullmatch(r'\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}', str(stamp or '')):
+        return None
+    try:
+        recorded = datetime.datetime.strptime(stamp, '%Y-%m-%d_%H-%M-%S')
+    except ValueError:
+        return None
+    return time.time() - recorded.replace(tzinfo=datetime.timezone(datetime.timedelta(minutes=offset))).timestamp()
+
+
+def cloud_clip_status(ids, stamps=None):
+    """Read only public queue metadata; never load payloads or device credentials.
+
+    stamps maps clip_id to its YYYY-MM-DD_HH-MM-SS recording stamp, so a clip that already
+    missed the uploader's parse window can be reported as never-to-be-scanned instead of queued.
+    """
+    stamps = stamps or {}
     path = os.environ.get("TSF_CLOUD_STATE", "/var/lib/tesla-sentry-cloud/queue.sqlite")
     if not os.path.isfile(path):
         return {"available": False, "reason": "no_queue", "clips": {}}
@@ -3039,7 +3056,12 @@ def cloud_clip_status(ids):
                 'SELECT clip_id,phase,updated_at,source,detail FROM progress WHERE clip_id IN (' + marks + ')', ids)} if 'progress' in tables else {}
             failures = {r['clip_id']: r['retry_at'] for r in db.execute(
                 'SELECT clip_id,retry_at FROM failures WHERE clip_id IN (' + marks + ')', ids)}
-            state = dict(db.execute("SELECT key,value FROM state WHERE key IN ('last_cycle','last_error','next_upload_at','backpressure')"))
+            state = dict(db.execute("SELECT key,value FROM state WHERE key IN ('last_cycle','last_error','next_upload_at','backpressure','utc_offset_minutes','parse_window_seconds')"))
+            try:
+                offset = int(state['utc_offset_minutes'])
+                window = int(state['parse_window_seconds'])
+            except (KeyError, TypeError, ValueError):
+                offset = window = None  # older uploader: no window published, keep the plain waiting label
             result = {}
             for key in ids:
                 row, track = rows.get(key), tracked.get(key)
@@ -3054,10 +3076,15 @@ def cloud_clip_status(ids):
                     phase = 'queued'
                 elif not track and key in failures:
                     phase = 'parse_failed'
+                if phase == 'waiting' and window is not None:
+                    age = clip_age_seconds(stamps.get(key), offset)
+                    if age is not None and age > window:
+                        phase = 'expired'  # recording missed the window: the uploader will never scan it
                 result[key] = {"phase": phase, "updated_at": (track or row or {}).get('updated_at'),
                                "detail": track['detail'] if track else '', "source": track['source'] if track else '',
                                "retry_at": failures.get(key)}
-            return {"available": True, "tracking": 'progress' in tables, "state": state, "clips": result}
+            return {"available": True, "tracking": 'progress' in tables, "state": state,
+                    "parse_window_seconds": window, "clips": result}
     except (OSError, sqlite3.Error):
         return {"available": False, "reason": "queue_unreadable", "clips": {}}
 
@@ -5420,7 +5447,10 @@ class Handler(BaseHTTPRequestHandler):
             if not 1 <= len(ids) <= 100 or any(not re.fullmatch(r'[a-f0-9]{64}', key) for key in ids):
                 self._json({"error": "invalid_ids"}, 400)
                 return
-            self._json(cloud_clip_status(ids))
+            stamps = q.get("stamps", [""])[0].split(',')
+            if len(stamps) != len(ids):
+                stamps = [''] * len(ids)  # older page sends no stamps: never guess, just report waiting
+            self._json(cloud_clip_status(ids, dict(zip(ids, stamps))))
         elif path == "/api/events":
             self._json(list_events())
         elif path == "/api/telemetry":

@@ -38,7 +38,8 @@ class CloudTest(unittest.TestCase):
 
     def collect(self, **kwargs):
         kwargs.setdefault('clock', lambda: 1767225660)
-        return sync.collect(self.db,self.archive,ROOT/'sentry-viewer.py',480,extractor=lambda *_:self.tel,**kwargs)
+        kwargs.setdefault('extractor', lambda *_: self.tel)
+        return sync.collect(self.db,self.archive,ROOT/'sentry-viewer.py',480,**kwargs)
 
     def test_recording_age_limits_parsing_even_when_mtime_is_recent(self):
         for age, expected in ((300, 1), (301, 0), (-1, 0)):
@@ -50,6 +51,29 @@ class CloudTest(unittest.TestCase):
                                       extractor=extractor, clock=lambda: 1767225600 + age)
                 self.assertEqual(result['queued'], expected)
                 self.assertEqual(extractor.call_count, expected)
+
+    def test_only_the_main_camera_is_parsed_per_group(self):
+        for cam in ('back', 'left_repeater'):
+            rear = self.video.with_name(self.video.name.replace('front', cam))
+            rear.write_bytes(b'fixture')
+            os.utime(rear, (1767225600, 1767225600))
+        calls = []
+        def no_sei(viewer, path):
+            calls.append(path.name)
+            return {'duration': 2, 'frames': []}
+        self.assertEqual(self.collect(extractor=no_sei)['queued'], 1)
+        self.assertEqual(calls, ['2026-01-01_08-00-00-front.mp4'])  # 停车片段不再把每一路都解一遍
+        self.db.execute('DELETE FROM clips')
+        self.db.commit()
+        tried = []
+        def broken_main(viewer, path):
+            tried.append(path.name)
+            if path.name.endswith('-front.mp4'):
+                raise ValueError('truncated')
+            return self.tel
+        self.assertEqual(self.collect(extractor=broken_main)['queued'], 1)
+        self.assertEqual(len(tried), 2)  # 主摄读不出来才回退到下一路
+        self.assertTrue(tried[0].endswith('-front.mp4'))
 
     def test_pedal_samples(self):
         f = frame(.1, 1)

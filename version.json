@@ -1,14 +1,14 @@
 {
-  "version": "2.5.16",
-  "date": "2026-11-15",
+  "version": "2.5.17",
+  "date": "2026-11-16",
   "notes": [
-    "云录像封面缓存真正可写: unit 加 ReadWritePaths, thumbs 目录 1777",
-    "代理容错: 轮询 409 不再重启会话, 超时任务的结果丢弃即可"
+    "逐片段状态区分积压老视频: 超窗片段显示不扫, 不再误报待扫描",
+    "云同步每组只解析主摄: 停车片段不再把六路都解一遍"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "5212d748f94a326baf0dffff1415cfa8baf8c8f61c1cde0efdc827cf4af089e9",
-    "sentry-cloud-sync.py": "e1daa7f66ffdd053fd15ee379ddca458a7e5e9c0ed40c0b28d7f01f44da43bee",
+    "sentry-viewer.py": "f31dcf1032e82193f3a6ec77cba7552703257c9d769486de8fb671514ca0fd06",
+    "sentry-cloud-sync.py": "b0896302f022c40a2c54d4a83ffed6595fba15d4d7db3c702bece1fab295a24e",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
     "scripts/install-cloud-sync.sh": "812f9c57ffdd7ae0705cad5f7c67b311c83a56e8ee71138b2b643f59ea4a2d29"
   }

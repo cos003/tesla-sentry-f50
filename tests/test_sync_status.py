@@ -110,4 +110,21 @@ class StatusTest(unittest.TestCase):
         self.assertFalse(report['available'])
         self.assertEqual(report['reason'], 'no_queue')
 
+    def test_backlog_clip_is_not_reported_as_waiting(self):
+        start = sync.dt.datetime.now(sync.dt.timezone(sync.dt.timedelta(hours=8)))
+        def phase(stamp):
+            return viewer.cloud_clip_status([self.key], {self.key: stamp})['clips'][self.key]['phase']
+        fresh = start.strftime('%Y-%m-%d_%H-%M-%S')
+        old = (start - sync.dt.timedelta(hours=2)).strftime('%Y-%m-%d_%H-%M-%S')
+        self.assertEqual(phase(old), 'waiting')  # no window published by an older uploader: no guessing
+        with self.db:
+            self.db.executemany('INSERT OR REPLACE INTO state VALUES (?,?)',
+                                [('utc_offset_minutes', '480'), ('parse_window_seconds', '300')])
+        self.assertEqual(phase(fresh), 'waiting')
+        self.assertEqual(phase(old), 'expired')
+        self.assertEqual(phase('not-a-stamp'), 'waiting')
+        sync.progress(self.db, self.key, 'queued')  # a real record always wins over the age guess
+        self.assertEqual(phase(old), 'queued')
+
+
 if __name__ == '__main__': unittest.main()

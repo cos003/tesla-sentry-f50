@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = '1.3.1'
+VERSION = '1.3.2'
 TELEMETRY_FIELDS = ['offset_ms', 'gear', 'speed_kmh', 'steering_deg', 'turn_signal',
                     'accel_x_mps2', 'accel_y_mps2', 'accel_z_mps2', 'ap_raw_state', 'accelerator_pct', 'brake_pressed']
 LEGACY_FIELDS = TELEMETRY_FIELDS[:9]
@@ -256,7 +256,7 @@ def discover(archive):
                     groups.setdefault(m[1], []).append(path)
             for stamp, files in sorted(groups.items(), reverse=True):
                 relative = str(folder.relative_to(root) / stamp)
-                # Prefer front, but use another camera if it has the only usable SEI.
+                # Front first: it is the only camera extracted unless the front file is unreadable.
                 files.sort(key=lambda p: (not p.name.endswith('-front.mp4'), p.name))
                 yield digest(relative), stamp, files
 
@@ -296,15 +296,15 @@ def collect(db, archive, viewer, offset, budget=10, extractor=extract, clock=tim
             if failure and failure[0] > clock():
                 continue
             processed += 1
+            # One camera per group: a successful main-camera read is the whole group's answer, even
+            # with no SEI. Otherwise a parked sentry clip would be parsed six times over for nothing.
+            # Only an unreadable (corrupt/truncated) main file falls back to the next camera.
             tel = None
             for path in files:
                 try:
                     progress(db, clip_id, 'parsing', path.name, clock=clock)
-                    candidate = extractor(viewer, path)
-                    if tel is None or candidate.get('frames'):
-                        tel = candidate
-                    if candidate.get('frames'):
-                        break
+                    tel = extractor(viewer, path)
+                    break
                 except (ValueError, OSError, subprocess.SubprocessError):
                     continue
             if tel is None:
@@ -587,9 +587,12 @@ def main(argv=None):
                 print('Upload deferred: ' + error, flush=True)
             previous_error = error
             with db:
+                # 解析窗口和录像时区只有上传器知道: 查看器据此区分"还会被扫"和"已经错过窗口".
                 for key, value in dict(last_cycle=str(int(time.time())), last_error=error,
                                        extraction_failures=str(stats['failed']), backpressure=str(stats['backpressure']),
-                                       next_upload_at=str(int(next_upload))).items():
+                                       next_upload_at=str(int(next_upload)),
+                                       utc_offset_minutes=str(offset),
+                                       parse_window_seconds=str(PARSE_WINDOW_SECONDS)).items():
                     db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', (key, value))
             if time.time() - last_prune > 3600:
                 prune(db, args.archive)
