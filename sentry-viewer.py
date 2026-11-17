@@ -71,6 +71,23 @@ LANG_JS = json.dumps([[c, n] for c, n in LANG_NAMES], ensure_ascii=False, separa
 LANG_TABLE.setdefault("en", {}).update({"Wi-Fi 网络": "Wi-Fi networks", "扫描附近网络": "Scan networks",
     "输入 Wi-Fi 密码": "Enter Wi-Fi password", "连接此网络": "Connect",
     "正在扫描…": "Scanning…", "正在切换网络…": "Switching networks…"})
+LANG_TABLE.setdefault("en", {}).update({
+    "个事件": "events", "段": "clips", "路": "cameras", "路画面": "camera views",
+    "路同步": "cameras in sync", "位置未记录": "Location not recorded",
+    "播放": "Play", "事件详情": "Event details", "可播放": "Playable",
+    "无画面": "No video", "播放全部": "Play all", "触发": "trigger",
+    "每段约 1 分钟": "about 1 min each", "个视频文件": "video files",
+    "分钟": "min", "约": "about", "同步详情": "Sync details",
+    "为什么没有 AI 摘要？": "Why no AI summary?",
+    "哨兵片段没有 SEI 数据，所以不做 AI 解析；画面仍可完整回放。":
+        "Sentry clips carry no SEI data, so they are not AI-analysed; the footage still plays in full.",
+    "复制链接": "Copy link", "链接已复制": "Link copied",
+    "左右B柱": "B-pillars", "左右前翼": "front fenders",
+    "触发画面": "Trigger camera", "占用": "Size", "目录": "Folder",
+    "记录仪图标": "Dashcam", "菜单保存": "Menu",
+    "这段有行车遥测": "Driving telemetry included",
+    "手动保存片段通常带 SEI 数据，播放时可查看车速、挡位、踏板和刹车。":
+        "Saved clips usually carry SEI data; speed, gear, pedals and braking are available during playback."})
 I18N_JS = json.dumps(LANG_TABLE, ensure_ascii=False, separators=(",", ":"))
 MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频有自己的更小限制)
 
@@ -200,7 +217,7 @@ def wifi_connect_worker(iface, ssid, password, key_mgmt):
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.8.1"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -718,8 +735,10 @@ html[data-theme="light"] .chip.d.on { color:var(--teal-deep); }
   grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px;
   max-width:1120px; margin:0 auto; }
 .card {
+  position:relative;
   display:flex; gap:12px; align-items:center; padding:10px;
-  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-card);
+  background:linear-gradient(180deg, var(--panel2), var(--panel));
+  border:1px solid var(--line); border-radius:var(--r-card);
   overflow:hidden; cursor:pointer;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.05), var(--soft);
   transition:transform .18s,border-color .18s,box-shadow .18s;
@@ -727,27 +746,40 @@ html[data-theme="light"] .chip.d.on { color:var(--teal-deep); }
 .card:hover { transform:translateY(-2px); border-color:var(--line-teal); }
 .card:focus-visible, .tab:focus-visible, .chip:focus-visible, .stab:focus-visible,
 .mini:focus-visible, .pback:focus-visible { outline:2px solid var(--teal-bright); outline-offset:2px; }
-.thumb { flex:0 0 132px; width:132px; height:76px; border-radius:10px; overflow:hidden;
+.thumb { flex:0 0 112px; width:112px; height:84px; border-radius:12px; overflow:hidden;
   background:var(--stage); position:relative; }
 .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
 .thumb .ph { background:var(--panel2); height:100%; display:flex; align-items:center;
   justify-content:center; color:var(--muted2); font-size:20px; }
+.thumb .shade { position:absolute; inset:0; pointer-events:none;
+  background:linear-gradient(180deg, rgba(3,12,12,.02) 40%, rgba(3,12,12,.60)); }
+.thumb .tplay { position:absolute; left:50%; top:50%; width:30px; height:30px;
+  margin:-15px 0 0 -15px; border-radius:50%; display:grid; place-items:center;
+  background:rgba(4,16,15,.52); border:1px solid rgba(255,255,255,.30); color:#fff;
+  -webkit-backdrop-filter:blur(3px); backdrop-filter:blur(3px); }
+.thumb .tplay:hover { background:rgba(10,150,149,.86); }
+.thumb .tplay svg { width:11px; height:11px; margin-left:1px; }
 .cnum { position:absolute; right:5px; bottom:5px; background:rgba(4,16,15,.74); color:#dbeceb;
   font-size:10px; line-height:1; padding:3px 6px; border-radius:6px;
   font-variant-numeric:tabular-nums; }
-.meta { flex:1; min-width:0; }
-.meta .l1 { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
-.meta .rt { font-size:13px; font-weight:650; white-space:nowrap; overflow:hidden;
+.meta { flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center; gap:5px; }
+.meta .l1 { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.catdot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:6px;
+  vertical-align:1px; background:var(--teal-bright); }
+.catdot.aware { background:var(--amber); box-shadow:0 0 0 3px rgba(234,176,99,.09); }
+.catdot.door { background:#6f9dff; box-shadow:0 0 0 3px rgba(111,157,255,.09); }
+.catdot.panic { background:var(--red); box-shadow:0 0 0 3px rgba(226,87,79,.09); }
+.catdot.other { background:var(--teal-bright); }
+.meta .rt { font-size:15.5px; font-weight:650; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis; letter-spacing:.005em; }
 .meta .tm { font-size:11.5px; color:var(--muted2); white-space:nowrap; flex:0 0 auto;
   font-variant-numeric:tabular-nums; }
-.meta .l2 { display:flex; justify-content:space-between; gap:8px; margin-top:5px;
+.meta .l2 { display:flex; justify-content:space-between; gap:8px;
   font-size:11.5px; color:var(--muted); white-space:nowrap; overflow:hidden; }
 .meta .l2 .loc { min-width:0; overflow:hidden; text-overflow:ellipsis; }
-.meta .l3 { margin-top:6px; font-size:10.5px; color:var(--muted2); letter-spacing:.02em;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
-.meta .l2 span { overflow:hidden; text-overflow:ellipsis; }
-.meta .l2 .sz { flex:0 0 auto; font-variant-numeric:tabular-nums; color:var(--muted2); }
+.meta .l3 { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted2);
+  letter-spacing:.02em; white-space:nowrap; overflow:hidden; font-variant-numeric:tabular-nums; }
+.meta .l3 .chev { margin-left:auto; color:var(--muted2); font-size:14px; line-height:1; }
 /* 日期分组小标题 */
 .dhead { grid-column:1/-1; display:flex; align-items:baseline; gap:8px; padding:10px 2px 0; }
 .dhead b { font-size:10.5px; font-weight:700; color:var(--muted2); letter-spacing:.06em; }
@@ -926,6 +958,104 @@ html[data-theme="light"] .qbtn.on { color:var(--teal-deep); }
 .sync-badge[data-phase="expired"] { color:var(--muted2); border-style:dashed; }
 .sync-badge[data-retry="1"] { cursor:pointer; pointer-events:auto; }
 
+
+/* ---------- 事件详情 ---------- */
+.detail { display:none; position:fixed; inset:0; height:100vh; height:100dvh;
+  background:var(--bg); color:var(--text); z-index:90; flex-direction:column; }
+.detail.open { display:flex; }
+.dtop { position:relative; display:flex; align-items:center; gap:10px; padding:10px 18px;
+  border-bottom:1px solid var(--line); background:var(--headbg);
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); }
+.dtop .dtitle { position:absolute; left:0; right:0; text-align:center; font-size:13px;
+  font-weight:650; letter-spacing:.01em; pointer-events:none; }
+.dtop .pdl { margin-left:auto; }
+.dbody { flex:1; overflow:auto; -webkit-overflow-scrolling:touch;
+  padding:14px 18px 28px; width:100%; max-width:640px; margin:0 auto; }
+.dhero { position:relative; aspect-ratio:16/9; min-height:180px; border-radius:16px; overflow:hidden;
+  background:var(--stage); border:1px solid var(--line); }
+.dhero img { width:100%; height:100%; object-fit:cover; display:block;
+  filter:saturate(.90) brightness(.90); }
+.dhero .dshade { position:absolute; inset:0;
+  background:linear-gradient(180deg, rgba(2,10,10,.50) 0%, transparent 30%, transparent 55%, rgba(2,10,10,.80)); }
+.dhero .dtag { position:absolute; font-size:10.5px; padding:3px 7px; border-radius:6px;
+  background:rgba(4,16,15,.60); border:1px solid rgba(255,255,255,.16); color:#e9fffc;
+  font-variant-numeric:tabular-nums; -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px); }
+.dhero .dtl { left:10px; top:10px; }
+.dhero .dtr { right:10px; top:10px; }
+.dhero .dplay { position:absolute; left:50%; top:46%; width:56px; height:56px;
+  margin:-28px 0 0 -28px; border-radius:50%; border:none; cursor:pointer;
+  background:linear-gradient(180deg,#18beba,var(--accent)); color:#03110f; font-size:18px;
+  display:grid; place-items:center;
+  box-shadow:0 12px 30px rgba(0,0,0,.5), 0 0 0 7px rgba(47,211,207,.10), inset 0 1px 0 rgba(255,255,255,.25); }
+.dhero .dbadge { position:absolute; left:12px; bottom:10px; display:flex; align-items:center; gap:5px;
+  font-size:10px; color:rgba(255,255,255,.86); font-variant-numeric:tabular-nums; }
+.dhero .dbadge i { width:6px; height:6px; border-radius:50%; background:var(--teal-bright);
+  box-shadow:0 0 8px rgba(47,211,207,.8); }
+.dhero .ddur { position:absolute; right:12px; bottom:10px; font-size:10px;
+  color:rgba(255,255,255,.64); font-variant-numeric:tabular-nums; }
+.dhead { display:flex; align-items:center; gap:8px; margin-top:16px; }
+.dhead h2 { font-size:21px; font-weight:650; letter-spacing:.01em; }
+.dstate { margin-left:auto; display:inline-flex; align-items:center; gap:4px; font-size:10px;
+  color:var(--green); background:rgba(101,188,123,.08); border:1px solid rgba(101,188,123,.20);
+  padding:3px 7px; border-radius:999px; }
+.dstate.bad { color:#ff8b85; background:rgba(226,87,79,.08); border-color:rgba(226,87,79,.24); }
+.dwhen { margin-top:6px; font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.dwhere { display:flex; align-items:center; gap:4px; margin-top:3px; font-size:11.5px; color:var(--muted); }
+.dchips { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+.dchip { height:26px; padding:0 9px; border-radius:7px; background:rgba(255,255,255,.035);
+  border:1px solid var(--line); display:inline-flex; align-items:center; gap:4px;
+  font-size:10.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.dactions { display:flex; gap:8px; margin-top:14px; }
+.dprimary { flex:1; height:46px; border:none; border-radius:12px; cursor:pointer;
+  background:linear-gradient(180deg,#13a8a5,var(--accent)); color:#eafffd;
+  font-size:13.5px; font-weight:650; display:flex; align-items:center; justify-content:center; gap:7px;
+  box-shadow:0 10px 24px -12px rgba(10,150,149,.8), inset 0 1px 0 rgba(255,255,255,.18); }
+.dicon { width:46px; height:46px; border-radius:12px; border:1px solid var(--line);
+  background:rgba(255,255,255,.035); color:var(--muted); cursor:pointer; font-size:16px; }
+.dicon:hover { color:var(--text); border-color:var(--line2); }
+.dsec { display:flex; align-items:baseline; justify-content:space-between; margin-top:18px; }
+.dsec b { font-size:13px; font-weight:650; }
+.dsec span { font-size:10.5px; color:var(--muted2); font-variant-numeric:tabular-nums; }
+.dfilm { display:flex; gap:6px; overflow-x:auto; padding:9px 0 4px; scrollbar-width:none; }
+.dfilm::-webkit-scrollbar { display:none; }
+.dseg { flex:0 0 auto; width:56px; background:none; border:none; padding:0; cursor:pointer;
+  color:inherit; font:inherit; }
+.dseg .im { display:block; width:56px; height:40px; border-radius:7px; overflow:hidden;
+  border:1px solid var(--line); background:var(--stage); }
+.dseg img { width:100%; height:100%; object-fit:cover; display:block;
+  filter:saturate(.85) brightness(.88); }
+.dseg .tm { display:block; text-align:center; font-size:9px; color:var(--muted2);
+  margin-top:4px; font-variant-numeric:tabular-nums; }
+.dseg.on .im { border-color:rgba(47,211,207,.80);
+  box-shadow:0 0 0 1px rgba(47,211,207,.30), 0 0 14px -3px rgba(47,211,207,.45); }
+.dseg.on .tm { color:var(--teal-bright); }
+.dnote { margin-top:12px; padding:11px 12px; border-radius:12px;
+  background:rgba(10,150,149,.06); border:1px solid rgba(10,150,149,.18); }
+.dnote b { display:block; font-size:11.5px; font-weight:650; color:var(--text); }
+.dnote p { margin:3px 0 0; font-size:10.5px; line-height:1.55; color:var(--muted); }
+.dsyncbox { margin-top:12px; border-top:1px solid var(--line); padding-top:8px; }
+.dsyncbox summary { cursor:pointer; font-size:10.5px; color:var(--muted2); list-style:none; }
+.dsyncbox summary::-webkit-details-marker { display:none; }
+.dsyncbox summary::after { content:' ⌄'; }
+.dsyncbox[open] summary::after { content:' ⌃'; }
+.dsyncrows { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+.dsyncrows > div { display:flex; align-items:center; gap:6px; font-size:10px; color:var(--muted2); }
+.dsyncrows time { font-variant-numeric:tabular-nums; min-width:52px; }
+.dkv { margin-top:14px; border-top:1px solid var(--line); }
+.dkv .r { display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+  padding:9px 1px; border-bottom:1px solid rgba(255,255,255,.045);
+  font-size:10.5px; color:var(--muted2); }
+.dkv .r b { font-weight:500; color:var(--text); text-align:right; max-width:68%;
+  min-width:0; overflow-wrap:anywhere; white-space:normal; line-height:1.5; }
+.dkv .r.wide { display:block; }
+.dkv .r.wide b { display:block; text-align:left; max-width:100%; margin-top:3px;
+  color:var(--muted); font-size:10.5px; }
+@media (max-width:640px){
+  .dbody { padding:12px 14px 24px; }
+  .dhead h2 { font-size:20px; }
+  .dhero { border-radius:14px; }
+}
+
 /* ---------- 设置面板 ---------- */
 .mask { display:none; position:fixed; inset:0; background:rgba(2,10,12,.62); z-index:200;
   -webkit-backdrop-filter:blur(3px); backdrop-filter:blur(3px); }
@@ -1061,10 +1191,12 @@ html[data-theme="light"] .toast { color:#fff; }
   .tabs { order:10; width:100%; margin-left:0; }
   #theme { order:4; margin-left:0; } #gear { order:5; margin-left:0; } #out { order:6; margin-left:0; }
   .filters { padding-left:14px; padding-right:14px; }
+  #filters { flex-wrap:wrap; overflow:visible; row-gap:6px; }
+  #filters .flab { display:none; }
   .grid-wrap { padding:12px 14px 72px; }
   .storwrap { padding:12px 14px 0; }
   .card { padding:9px; gap:10px; }
-  .thumb { flex:0 0 112px; width:112px; height:64px; }
+  .thumb { flex:0 0 104px; width:104px; height:80px; }
   /* 播放器手机端紧凑化: 面板/卡片占高更小, 视频尽量多露 */
   .pscroll { padding:10px 12px 12px; gap:10px; }
   .tpanel { padding:12px 14px 10px; }
@@ -1110,6 +1242,14 @@ html[data-theme="light"] .toast { color:#fff; }
 <div class="empty" id="empty" style="display:none"><div class="big">📹</div>
 <div>暂无归档视频<br><small style="font-size:12px">车机录制后, 归档同步任务会自动把视频收进来 (镜像需空闲10分钟)</small></div></div>
 
+<div class="detail" id="edetail">
+  <div class="dtop">
+    <button class="pback" onclick="closeDetail()">‹ 返回</button>
+    <span class="dtitle">事件详情</span>
+    <button class="pdl" onclick="shareDetail()" title="复制链接">↗</button>
+  </div>
+  <div class="dbody" id="dbody"></div>
+</div>
 <div class="player" id="player">
   <div class="ptop">
     <button class="pback" onclick="closePlayer()">‹ 返回</button>
@@ -1496,6 +1636,17 @@ function reasonLabel(r) {
   for (const k in REASON_LABEL) if (r.indexOf(k) === 0) return t(REASON_LABEL[k]);
   return r;
 }
+/* 手动保存的原因文案偏长, 卡片和筛选里用短标签; 详情标题仍用完整文案 */
+const REASON_SHORT = {
+  user_interaction_dashcam_launcher_action_tapped: '记录仪图标',
+  user_interaction_dashcam_menu: '菜单保存'
+};
+function reasonShort(r) {
+  if (!r) return '';
+  if (REASON_SHORT[r]) return t(REASON_SHORT[r]);
+  for (const k in REASON_SHORT) if (r.indexOf(k) === 0) return t(REASON_SHORT[k]);
+  return reasonLabel(r);
+}
 const EMPTY_HTML = document.getElementById('empty').innerHTML;
 /* Model 3/Y (HW3) 只有 4 路: front / back / left_repeater / right_repeater
    Model S/X 与 HW4 车型才有 6 路 (含 left_pillar / right_pillar)
@@ -1574,7 +1725,7 @@ async function load() {
     b.onclick = () => { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); b.classList.add('active'); currentCat = c; reasonFilter = 'all'; dateFilter = 'all'; render(c); };
     tabs.appendChild(b);
   }
-  document.getElementById('stat').textContent = `${t('归档')} ${Object.values(data).reduce((a, v) => a + v.length, 0)} ${t('条')}`;
+  document.getElementById('stat').textContent = `${t('归档')} ${Object.values(data).reduce((a, v) => a + v.length, 0)} ${t('个事件')}`;
   lastSig = sigOf(data);
   renderQSel();
   render(currentCat);
@@ -1661,8 +1812,8 @@ async function refreshLive() {
         const c = Object.keys(d)[i];
         if (c) b.textContent = `${t(CATS_NAME[c] || c)} (${d[c].length})`;
       });
-      document.getElementById('stat').textContent = `${t('归档')} ${Object.values(d).reduce((a, v) => a + v.length, 0)} ${t('条')}`;
-      if (!document.getElementById('player').classList.contains('open')) render(currentCat);
+      document.getElementById('stat').textContent = `${t('归档')} ${Object.values(d).reduce((a, v) => a + v.length, 0)} ${t('个事件')}`;
+      if (!document.getElementById('player').classList.contains('open') && !document.getElementById('edetail').classList.contains('open')) render(currentCat);
     }
   } catch (e) {}
 }
@@ -1745,7 +1896,7 @@ function renderFilters(cat) {
     else {
       rbox.className = 'filters show';
       const items = [['all', t('全部'), byDate.length]].concat(
-        rkeys.map(k => [k, reasonLabel(k) !== k ? reasonLabel(k) : t('未标注原因'), rcnt[k]]));
+        rkeys.map(k => [k, reasonLabel(k) !== k ? reasonShort(k) : t('未标注原因'), rcnt[k]]));
       rbox.innerHTML = '<span class="flab">' + t('原因') + '</span>' + items.map(([k, label, n]) =>
         `<button class="chip${k === reasonFilter ? ' on' : ''}" onclick="setReason('${k}')">${label}<span class="n">${n}</span></button>`
       ).join('');
@@ -1880,9 +2031,10 @@ function render(cat) {
   for (const ev of evs) {
     const day = dateOf(ev);
     if (day && day !== prevDay) {           // 日期分组小标题 (像官方App的"下午 14:00-17:59 · 3条")
-      const n = evs.filter(x => dateOf(x) === day).length;
+      const dayEvs = evs.filter(x => dateOf(x) === day);
+      const daySegs = dayEvs.reduce((a, x) => a + groupVideos(x.videos).length, 0);
       const h = document.createElement('div'); h.className = 'dhead';
-      h.innerHTML = '<b>' + dheadLabel(day) + '</b><span class="n">' + n + ' ' + t('条') + '</span>';
+      h.innerHTML = '<b>' + dheadLabel(day) + '</b><span class="n">' + dayEvs.length + ' ' + t('个事件') + ' · ' + daySegs + ' ' + t('段') + '</span>';
       g.appendChild(h);
       prevDay = day;
     }
@@ -1894,35 +2046,31 @@ function render(cat) {
       /* 哨兵事件: 用触发摄像头在触发那一帧当封面; 其他/回落: 前摄像头第1秒 */
       const src = sentryThumbSrc(ev, groups) ||
         (vids.find(v => v.cam === 'front') || vids[0]).url.replace('/media/', '/thumb/');
-      th = `<div class="thumb"><img loading="lazy" decoding="async" src="${src}" alt="" onerror="thumbErr(this)"><span class="cnum">${vids.length} ${t('路')}</span></div>`;
+      th = `<div class="thumb"><img loading="lazy" decoding="async" src="${src}" alt="" onerror="thumbErr(this)"><span class="shade"></span><span class="tplay" role="button" aria-label="${t('播放')}"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M8 5.2v13.6L19 12z" fill="currentColor"/></svg></span><span class="cnum">${vids.length} ${t('路')}</span></div>`;
     } else {
       th = `<div class="thumb"><div class="ph">🎞</div></div>`;
     }
     const mm = ev.meta || {};
     /* 标题: 触发原因·触发摄像头 (哨兵), 否则分类名 */
     let title = t(CATS_NAME[cat] || cat);
+    let catdot = 'other';
     if (mm.reason) {
-      title = reasonLabel(mm.reason) || mm.reason;
-      if (isSentryEv(mm) && mm.camera) {
-        const ck = CAM_IDX[+mm.camera];
-        if (ck) title += ' · ' + camLabel(ck);
-      }
+      title = reasonShort(mm.reason) || mm.reason;
+      if (isSentryEv(mm)) catdot = reasonTab(mm.reason);
     }
-    const tm = (ev.name.match(/_(\d{2}-\d{2})/) || [,''])[1].replace('-', ':');
-    const tmTxt = tm ? tm : fmtName(ev.name);
-    const extra = (mm.city ? ' · ' + mm.city : '') + (mm.street ? ' ' + mm.street : '');
-    const dayTxt = dateFilter === 'all' && day ? day.slice(5).replace('-', '/') + ' · ' : '';
-    const mb = ev.size / 1048576;
-    const szTxt = mb >= 1 ? mb.toFixed(1) + ' MB' : (mb * 1024).toFixed(0) + ' KB';
+    const hm = k => (String(k || '').match(/_(\d{2})-(\d{2})/) || [, '', '']).slice(1).join(':');
+    const times = groups.map(g => hm(g.key)).filter(Boolean);
+    const tmTxt = times.length > 1 ? times[0] + '–' + times[times.length - 1] : (times[0] || fmtName(ev.name));
+    const extra = [mm.city, mm.street].filter(Boolean).join(' · ');
+    const szTxt = evSizeTxt((ev.size || 0) / 1048576);
     /* 三行: 原因/时刻 · 位置/大小 · 日期与路数. 城市缺失时第二行只留大小 */
-    const locTxt = extra.replace(/^\s*·\s*/, '');
-    card.innerHTML = th + `<div class="meta"><div class="l1"><span class="rt" title="${title}">${title}</span><span class="tm">${tmTxt}</span></div><div class="l2"><span class="loc">${locTxt}</span><span class="sz">${szTxt}</span></div><div class="l3"><span>${dayTxt}${vids.length} ${t('路画面')}</span></div></div>`;
-    const statusRow=document.createElement('div');statusRow.className='sync-status-row';
-    for(const group of groups){const wrap=document.createElement('span');
-      if(groups.length>1){const tm=document.createElement('small');tm.textContent=(group.key.split('_')[1]||group.key).replace(/-/g,':')+' ';wrap.append(tm);}
-      wrap.append(syncBadge(group.vids[0]?.sync_id,group.key,cat));statusRow.append(wrap);}
-    card.querySelector('.meta').append(statusRow);
-    card.onclick = () => openPlayer(ev);
+    const locTxt = extra.replace(/^\s*·\s*/, '') || t('位置未记录');
+    const segN = groups.length;
+    const spec = `${vids.length} ${t('路')} · ${segN} ${t('段')} · ${szTxt}`;
+    card.innerHTML = th + `<div class="meta"><div class="l1"><span class="rt" title="${title}"><i class="catdot ${catdot}"></i>${title}</span><span class="tm">${tmTxt}</span></div><div class="l2"><span class="loc">${locTxt}</span></div><div class="l3"><span>${spec}</span><span class="chev">›</span></div></div>`;
+    card.onclick = () => openDetail(ev);
+    const pbtn = card.querySelector('.tplay');
+    if (pbtn) pbtn.onclick = e => { e.stopPropagation(); openPlayer(ev, 0); };
     g.appendChild(card);
   }
   refreshSyncStatus();
@@ -1956,11 +2104,122 @@ function focusCell(cell) {
   vg.style.gridTemplateColumns = '1fr';
   vg.style.gridTemplateRows = '1fr';
 }
-function openPlayer(ev) {
+function evSizeTxt(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+  if (mb >= 10) return Math.round(mb) + ' MB';
+  if (mb >= 1) return mb.toFixed(1) + ' MB';
+  return Math.round(mb * 1024) + ' KB';
+}
+function detailDate(ev) {
+  const d = dateOf(ev);
+  if (!d) return '';
+  if (LANG === 'zh') return d.replace(/^(\d{4})-(\d{2})-(\d{2})$/, (_, y, m, dd) => `${+m} 月 ${+dd} 日`);
+  try { return new Date(d + 'T00:00:00').toLocaleDateString(LANG, { month: 'short', day: 'numeric' }); }
+  catch (e) { return d; }
+}
+function openPlayer(ev, ix) {
   cur = ev;
   curClips = groupVideos(ev.videos);
-  curClipIx = curClips.length ? curClips.length - 1 : 0;
+  curClipIx = (typeof ix === 'number' && curClips[ix]) ? ix : (curClips.length ? curClips.length - 1 : 0);
   renderClip();
+}
+
+/* ---------- 事件详情 ---------- */
+let detailEv = null, detailGroups = [];
+function hmOf(k) { const m = String(k || '').match(/_(\d{2})-(\d{2})/); return m ? m[1] + ':' + m[2] : ''; }
+function secOf(k) { const m = String(k || '').match(/_(\d{2})-(\d{2})-(\d{2})/); return m ? m[1] + ':' + m[2] + ':' + m[3] : ''; }
+function groupThumb(g) {
+  const v = g.vids.find(x => x.cam === 'front') || g.vids[0];
+  return v ? v.url.replace('/media/', '/thumb/') : '';
+}
+function detailHero(ev, groups) {
+  return sentryThumbSrc(ev, groups) || (groups.length ? groupThumb(groups[0]) : '');
+}
+function openDetail(ev) {
+  const groups = groupVideos(ev.videos), md = ev.meta || {};
+  detailEv = ev; detailGroups = groups;
+  const vids = camSort(groups.length ? groups[groups.length - 1].vids : []);
+  const n = vids.length, segN = groups.length || 1;
+  const fileN = groups.reduce((a, g) => a + g.vids.length, 0);
+  const times = groups.map(g => hmOf(g.key)).filter(Boolean);
+  const tmTxt = times.length > 1 ? times[0] + '–' + times[times.length - 1] : (times[0] || fmtName(ev.name));
+  const title = (md.reason && (reasonLabel(md.reason) || md.reason)) || t(CATS_NAME[currentCat] || currentCat);
+  const loc = [md.city, md.street].filter(Boolean).join(' · ') || t('位置未记录');
+  const szTxt = evSizeTxt((ev.size || 0) / 1048576);
+  const camKey = (md.camera && isSentryEv(md)) ? CAM_IDX[+md.camera] : null;
+  const dateTxt = detailDate(ev);
+  const hero = detailHero(ev, groups);
+  const camNames = n > 4
+    ? `${t('前视')} / ${t('后视')} / ${t('左右B柱')} / ${t('左右前翼')}`
+    : `${t('前视')} / ${t('后视')} / ${t('左右B柱')}`;
+  const chips = [
+    n ? `<span class="dchip">${n} ${t('路画面')}</span>` : '',
+    `<span class="dchip">${segN} ${t('段')}</span>`,
+    `<span class="dchip">${szTxt}</span>`,
+    camKey ? `<span class="dchip">${t('触发画面')} · ${camLabel(camKey)}</span>` : ''
+  ].join('');
+  const film = groups.map((g, i) => `<button class="dseg${i === 0 ? ' on' : ''}" onclick="playDetail(${i})"><span class="im">${groupThumb(g) ? `<img loading="lazy" src="${groupThumb(g)}" alt="">` : ''}</span><span class="tm">${hmOf(g.key)}</span></button>`).join('');
+  const rows = [
+    [t('摄像头'), n ? `${n} ${t('路')} · ${camNames}` : '—', true],
+    ...(camKey ? [[t('触发画面'), camLabel(camKey)]] : []),
+    [t('片段'), `${segN} ${t('段')} · ${t('每段约 1 分钟')}`],
+    [t('占用'), `${szTxt} · ${fileN} ${t('个视频文件')}`]
+  ].map(([k, v, wide]) => `<div class="r${wide ? ' wide' : ''}"><span>${k}</span><b>${v}</b></div>`).join('');
+  const note = currentCat === 'SentryClips'
+    ? `<div class="dnote"><b>${t('为什么没有 AI 摘要？')}</b><p>${t('哨兵片段没有 SEI 数据，所以不做 AI 解析；画面仍可完整回放。')}</p></div>`
+    : currentCat === 'SavedClips'
+      ? `<div class="dnote"><b>${t('这段有行车遥测')}</b><p>${t('手动保存片段通常带 SEI 数据，播放时可查看车速、挡位、踏板和刹车。')}</p></div>`
+      : '';
+  document.getElementById('dbody').innerHTML = `
+    <div class="dhero">
+      ${hero ? `<img src="${hero}" alt="">` : ''}
+      <span class="dshade"></span>
+      <span class="dtag dtl">${groups.length ? secOf(groups[0].key) : tmTxt}</span>
+      <span class="dtag dtr">${n} ${t('路')}</span>
+      <button class="dplay" onclick="playDetail(0)" aria-label="${t('播放全部')}">▶</button>
+      <span class="dbadge"><i></i>${t('片段')} 1 / ${segN}</span>
+      <span class="ddur">${t('约')} ${segN} ${t('分钟')}</span>
+    </div>
+    <div class="dhead"><h2>${title}</h2><span class="dstate${n ? '' : ' bad'}">${n ? '✓ ' + t('可播放') : t('无画面')}</span></div>
+    <div class="dwhen">${dateTxt} ${tmTxt} · ${segN} ${t('段')}</div>
+    <div class="dwhere">${loc}</div>
+    <div class="dchips">${chips}</div>
+    <div class="dactions">
+      <button class="dprimary" onclick="playDetail(0)">▶ ${t('播放全部')}</button>
+      <button class="dicon" onclick="shareDetail()" title="${t('复制链接')}">↗</button>
+    </div>
+    <div class="dsec"><b>${t('片段')}</b><span>${segN} ${t('段')} · ${n} ${t('路同步')}</span></div>
+    <div class="dfilm">${film}</div>
+    ${note}
+    <div class="dkv">${rows}</div>
+    <details class="dsyncbox" ontoggle="if(this.open)refreshSyncStatus()"><summary>${t('同步详情')} · ${segN} ${t('段')}</summary><div class="dsyncrows" id="dsyncrows"></div></details>`;
+  const box = document.getElementById('dsyncrows');
+  if (box) groups.forEach(g => {
+    const r = document.createElement('div');
+    const tm = document.createElement('time'); tm.textContent = secOf(g.key);
+    r.append(tm, syncBadge(g.vids[0]?.sync_id, g.key, currentCat));
+    box.append(r);
+  });
+  const body = document.getElementById('dbody');
+  if (body) body.scrollTop = 0;
+  document.getElementById('edetail').classList.add('open');
+  refreshSyncStatus();
+}
+function closeDetail() { document.getElementById('edetail').classList.remove('open'); }
+function playDetail(i) {
+  const segs = document.querySelectorAll('#dbody .dseg');
+  segs.forEach((s, k) => s.classList.toggle('on', k === (i || 0)));
+  if (detailEv) openPlayer(detailEv, i || 0);
+}
+function shareDetail() {
+  if (!detailEv) return;
+  const url = location.origin + '/?ev=' + encodeURIComponent(currentCat + '/' + detailEv.name);
+  const done = () => toast('链接已复制');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(done, () => prompt(t('复制链接'), url));
+  } else {
+    prompt(t('复制链接'), url);
+  }
 }
 function renderClip() {
   const ev = cur;
@@ -1995,7 +2254,6 @@ function renderClip() {
     vid.setAttribute('webkit-playsinline', ''); vid.setAttribute('x5-playsinline', '');
     const lb = document.createElement('span'); lb.className = 'clabel'; lb.textContent = camShort(v.cam);
     cell.appendChild(vid); cell.appendChild(cl); cell.appendChild(lb);
-    const status=syncBadge(v.sync_id,clip.key,currentCat);status.classList.add('camera-sync');cell.append(status);
     cell.onclick = () => focusCell(cell);
     vg.appendChild(cell);
   });
@@ -2005,7 +2263,7 @@ function renderClip() {
   document.getElementById('ic-big').textContent =
     (md0.reason && (reasonLabel(md0.reason) || md0.reason)) || CATS_NAME[currentCat] || currentCat;
   const mb = (ev.size || 0) / 1048576;
-  document.getElementById('ic-sub').innerHTML = clip.vids.length + ' 路画面 · <span id="ic-dur">--:--</span>' + (mb >= 0.05 ? ' · ' + (mb >= 1 ? mb.toFixed(1) + ' MB' : Math.round(mb * 1024) + ' KB') : '');
+  document.getElementById('ic-sub').innerHTML = clip.vids.length + ' 路画面 · <span id="ic-dur">--:--</span>' + (mb >= 0.05 ? ' · ' + evSizeTxt(mb) : '');
   const cb = document.getElementById('clipbar');
   if (curClips.length > 1) {
     cb.classList.add('show');
@@ -2018,7 +2276,6 @@ function renderClip() {
     cb.classList.remove('show');
     cb.innerHTML = '';
   }
-  [...cb.querySelectorAll('button')].forEach((button,i)=>{button.append(document.createElement('br'),syncBadge(curClips[i].vids[0]?.sync_id,curClips[i].key,currentCat));});
   const sub=document.getElementById('ic-sub');
   sub.append(document.createTextNode(' · '),syncBadge(clip.vids[0]?.sync_id,clip.key,currentCat));
   refreshSyncStatus();
@@ -2528,7 +2785,10 @@ document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   const f = document.querySelector('#vgrid .vcell.focused');
   if (f) { focusCell(f); return; }
-  closeExport(); closePlayer(); closePanel();
+  closeExport();
+  if (document.getElementById('player').classList.contains('open')) { closePlayer(); return; }
+  closeDetail();
+  closePanel();
 });
 
 /* ---------- 设置面板 ---------- */
