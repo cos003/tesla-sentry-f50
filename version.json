@@ -1,15 +1,13 @@
 {
-  "version": "2.8.1",
-  "date": "2026-11-17",
+  "version": "2.8.2",
+  "date": "2026-11-18",
   "notes": [
-    "事件列表改版: 11 行「哨兵告警不解析」收掉, 卡片只讲事件(类型/时间/位置/路数/段数/体积)",
-    "新增事件详情页: 大预览 + 播放全部 + 11 格胶片 + 一次性解释, 逐段同步状态折叠到「同步详情」",
-    "播放器片段栏和视频格不再重复状态; 事件/段/路/体积口径统一, 大文件显示 GB",
-    "手动保存页同款卡片/详情: 长原因用短标签, 有遥测的片段在详情里说明"
+    "涂装上传时若 Wraps 目录不存在会自动创建",
+    "涂装页可搜索 wraps.cc, 一键把 PNG 写入车机 U 盘"
   ],
   "bundle_format": 1,
   "files": {
-    "sentry-viewer.py": "c77483252af5c0e4728669305b8f676605297ee5b7b805181be328236e04933a",
+    "sentry-viewer.py": "d0c79ab1f33b901d8ee237c6b9ff6718900829cee5686b68dc3a27d9780710a3",
     "sentry-cloud-sync.py": "3becac67a4ca280a6079fa6aacf6ef897d50dfa8408a9548b15cf3cd1b9dc454",
     "sentry-ota.py": "f1dc8b73a721ad701d4c6ff9fb68320ecf6d5733eeeb74f0a5cbaa12c60fab5b",
     "scripts/install-cloud-sync.sh": "812f9c57ffdd7ae0705cad5f7c67b311c83a56e8ee71138b2b643f59ea4a2d29"

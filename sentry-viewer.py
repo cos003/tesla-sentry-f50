@@ -217,7 +217,7 @@ def wifi_connect_worker(iface, ssid, password, key_mgmt):
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.8.1"
+APP_VERSION = "2.8.2"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -1348,9 +1348,32 @@ html[data-theme="light"] .toast { color:#fff; }
     <div id="audio-done"></div>
   </div>
   <div id="tab-wraps" style="display:none">
-    <div class="hint">车机涂装/牌照图片: 上传 png/jpg/webp, 直接写入车机U盘根目录 Wraps/ (车机端设置里选)。连接时会临时断开车机读取几秒。</div>
+    <div class="hint">车机涂装/牌照图片写入 U 盘根目录 Wraps/ (车机 Toybox → Paint Shop → Wraps 里选)。连接时会临时断开车机读取几秒。</div>
     <div id="wraps-status" style="margin-bottom:10px"></div>
-    <label class="upbtn" id="wraps-upbtn">＋ 上传图片到 Wraps/ (png/jpg/webp, ≤100MB)<input type="file" id="wraps-file" accept=".png,.jpg,.jpeg,.webp" hidden multiple></label>
+    <div class="hint">从 <a href="https://wraps.cc/" target="_blank" rel="noopener" style="color:var(--teal-bright)">wraps.cc</a> 搜索并一键写入车机。未登录时同一网络每天只能下载 1 次。</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input id="wraps-q" placeholder="搜索涂装, 如 police / 樱花" onkeydown="if(event.key==='Enter')searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:9px 12px;font-size:12px;outline:none">
+      <button class="mini primary" onclick="searchWraps(1)">搜索</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <select id="wraps-model" onchange="searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:8px 10px;font-size:12px">
+        <option value="">全部车型</option>
+        <option value="model3">Model 3</option>
+        <option value="modely">Model Y</option>
+        <option value="modely-l">Model Y L</option>
+        <option value="models">Model S</option>
+        <option value="modelx">Model X</option>
+        <option value="cybertruck">Cybertruck</option>
+      </select>
+      <select id="wraps-sort" onchange="searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:8px 10px;font-size:12px">
+        <option value="popular" selected>最多下载</option>
+        <option value="">最新</option>
+        <option value="liked">最多喜欢</option>
+      </select>
+    </div>
+    <div id="wraps-catalog" style="display:flex;flex-wrap:wrap;gap:10px"></div>
+    <div id="wraps-pager" style="display:flex;gap:8px;align-items:center;margin:8px 0 14px;font-size:12px;color:var(--muted)"></div>
+    <label class="upbtn" id="wraps-upbtn">＋ 从本机上传到 Wraps/ (png/jpg/webp, ≤100MB)<input type="file" id="wraps-file" accept=".png,.jpg,.jpeg,.webp" hidden multiple></label>
     <div id="wraps-grid" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:12px"></div>
   </div>
   <div id="tab-files">
@@ -2812,7 +2835,7 @@ function stab(which) {
   if (which === 'auth') pwLoad();
   if (which === 'cloud') cloudLoad();
   if (which === 'wifi') wifiLoad();
-  if (which === 'wraps') refreshWraps();
+  if (which === 'wraps') { refreshWraps(); if (!window._wrapsLoaded) searchWraps(1); }
 }
 
 /* ---------- 飞书推送 ---------- */
@@ -3291,6 +3314,73 @@ document.getElementById('wraps-file').onchange = async function () {
   this.value = '';
   refreshWraps();
 };
+async function searchWraps(page) {
+  const box = document.getElementById('wraps-catalog');
+  const pager = document.getElementById('wraps-pager');
+  const q = document.getElementById('wraps-q').value || '';
+  const model = document.getElementById('wraps-model').value || '';
+  const sort = document.getElementById('wraps-sort').value || '';
+  box.innerHTML = '<div class="hint">正在搜索 wraps.cc...</div>';
+  pager.innerHTML = '';
+  let j;
+  try {
+    const u = '/api/wraps/catalog?q=' + encodeURIComponent(q) + '&model=' + encodeURIComponent(model) +
+      '&sort=' + encodeURIComponent(sort) + '&page=' + (page || 1);
+    j = await (await fetch(u)).json();
+  } catch (e) {
+    box.innerHTML = '<div class="hint">搜索失败</div>';
+    return;
+  }
+  if (!j.ok) { box.innerHTML = '<div class="hint">' + (j.msg || '搜索失败') + '</div>'; return; }
+  window._wrapsLoaded = true;
+  const items = j.items || [];
+  box.innerHTML = '';
+  if (!items.length) { box.innerHTML = '<div class="hint">没有匹配的涂装</div>'; return; }
+  for (const it of items) {
+    const card = document.createElement('div');
+    card.style.cssText = 'width:110px;text-align:center';
+    const img = document.createElement('img');
+    img.src = it.thumb || '';
+    img.alt = it.title || '';
+    img.style.cssText = 'width:100px;height:68px;object-fit:cover;background:var(--stage);border-radius:8px;border:1px solid var(--line)';
+    const cap = document.createElement('div');
+    cap.textContent = it.title || it.id;
+    cap.title = (it.title || '') + (it.model ? '\n' + it.model : '');
+    cap.style.cssText = 'font-size:11px;color:var(--muted);margin:4px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    const btn = document.createElement('button');
+    btn.className = 'mini primary';
+    btn.textContent = '写入车机';
+    btn.style.cssText = 'font-size:11px;padding:4px 10px';
+    btn.onclick = () => installWrap(it.id, btn);
+    card.append(img, cap, btn);
+    box.appendChild(card);
+  }
+  const cur = j.page || 1, pages = j.pages || 1;
+  if (pages > 1) {
+    const prev = document.createElement('button');
+    prev.className = 'mini'; prev.textContent = '上一页'; prev.disabled = cur <= 1;
+    prev.onclick = () => searchWraps(cur - 1);
+    const next = document.createElement('button');
+    next.className = 'mini'; next.textContent = '下一页'; next.disabled = cur >= pages;
+    next.onclick = () => searchWraps(cur + 1);
+    const label = document.createElement('span');
+    label.textContent = cur + ' / ' + pages + (j.total ? ' · ' + j.total + ' 款' : '');
+    pager.append(prev, label, next);
+  }
+}
+async function installWrap(id, btn) {
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '写入中';
+  try {
+    const r = await fetch('/api/wraps/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+    const j = await r.json();
+    toast((j.ok ? '✅ ' : '❌ ') + (j.msg || ''));
+    if (j.ok) refreshWraps();
+  } catch (e) { toast('❌ ' + t('上传失败')); }
+  btn.disabled = false;
+  btn.textContent = old;
+}
 function switchArea(a) {
   area = a;
   document.getElementById('area-usb').classList.toggle('active', a === 'usb');
@@ -3438,9 +3528,25 @@ def ensure_dirs():
         os.makedirs(os.path.join(ARCHIVE, c), exist_ok=True)
 
 
+_NAME_OK = re.compile(r'^[\w\-. ]{1,80}$')
+
+
+def sanitize_name(name):
+    """上传用: 去掉括号等不能落盘的字符, 能改的就改, 改完仍不合法才拒绝."""
+    name = os.path.basename((name or "").replace("\\", "/"))
+    name = re.sub(r'[^\w\-. ]+', '', name)
+    name = re.sub(r' {2,}', ' ', name).strip(" .")
+    if len(name) > 80:
+        root, ext = os.path.splitext(name)
+        if len(ext) > 16 or not re.match(r'^\.[A-Za-z0-9]{1,15}$', ext):
+            ext = ""
+        name = (root[:80 - len(ext)] + ext).strip(" .")
+    return name if name not in (".", "..") and _NAME_OK.match(name) else None
+
+
 def safe_name(name):
     name = os.path.basename(name or "")
-    return name if re.match(r'^[\w\-. ]{1,80}$', name) else None
+    return name if _NAME_OK.match(name) else None
 
 
 def list_events():
@@ -3810,6 +3916,153 @@ def usb_real(p):
     if rp != MNT and not rp.startswith(MNT + "/"):
         return None
     return rp
+
+
+_WRAP_MODELS = {"", "model3", "modely", "modely-l", "models", "modelx", "cybertruck"}
+_WRAP_SORTS = {"", "popular", "liked"}
+_WRAP_ID = re.compile(r"^[A-Za-z0-9]{6,32}$")
+_WRAP_MAX = 2 * 1024 * 1024
+_wraps_cache = {}
+_wraps_cache_lock = threading.Lock()
+
+
+def _html_text(s):
+    return (s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", '"').replace("&#39;", "'").replace("&#x27;", "'").strip())
+
+
+def parse_wraps_catalog(html):
+    """从 wraps.cc 图库页抽出涂装卡片. 返回 (items, page, pages, total)."""
+    items, seen = [], set()
+    for chunk in re.split(r'<a class="card', html or "")[1:]:
+        end = chunk.find("</a>")
+        if end != -1:
+            chunk = chunk[:end]
+        mid = re.search(r'href="(?:/[a-z]{2})?/wrap/([A-Za-z0-9]{6,32})"', chunk)
+        if not mid or mid.group(1) in seen:
+            continue
+        seen.add(mid.group(1))
+        img = re.search(r'src="(https://img\.wraps\.cc/thumb/[^"]+)"', chunk)
+        title = re.search(r'<p class="truncate[^"]*">([^<]+)</p>', chunk)
+        fit = re.search(r'<span class="truncate">([^<]+)</span>', chunk)
+        items.append({
+            "id": mid.group(1),
+            "title": _html_text(title.group(1)) if title else mid.group(1),
+            "model": _html_text(fit.group(1)) if fit else "",
+            "thumb": img.group(1) if img else "",
+        })
+    page, pages, total = 1, 1, 0
+    m = re.search(r"第\s*(\d+)\s*/\s*(\d+)\s*页", html or "")
+    if m:
+        page, pages = int(m.group(1)), int(m.group(2))
+    tm = re.search(r"共\s*([\d,]+)\s*款", html or "")
+    if tm:
+        total = int(tm.group(1).replace(",", ""))
+    return items, page, pages, total
+
+
+def _wraps_open(url, limit):
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "tsf-sentry/" + APP_VERSION,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=20)
+    except urllib.error.HTTPError as e:
+        body = e.read(4096)
+        e.close()
+        return e.code, e.headers, body, e.geturl() if hasattr(e, "geturl") else url
+    with resp:
+        final = resp.geturl()
+        host = urllib.parse.urlsplit(final).hostname
+        if host != "wraps.cc":
+            raise OSError("wraps.cc 跳转到了其它站点")
+        return resp.status, resp.headers, resp.read(limit + 1), final
+
+
+def wraps_catalog(q, model, sort, page):
+    q = re.sub(r"\s+", " ", (q or "").strip())[:80]
+    model = model if model in _WRAP_MODELS else ""
+    sort = sort if sort in _WRAP_SORTS else ""
+    try:
+        page = max(1, min(30, int(page)))
+    except (TypeError, ValueError):
+        page = 1
+    key = (q, model, sort, page)
+    now = time.time()
+    with _wraps_cache_lock:
+        hit = _wraps_cache.get(key)
+        if hit and now - hit[0] < 60:
+            return hit[1]
+    params = {"page": str(page)}
+    if q:
+        params["q"] = q
+    if model:
+        params["model"] = model
+    if sort:
+        params["sort"] = sort
+    try:
+        _status, _headers, data, _final = _wraps_open(
+            "https://wraps.cc/zh?" + urllib.parse.urlencode(params), 1024 * 1024)
+    except Exception as e:
+        return {"ok": False, "msg": "无法访问 wraps.cc: " + str(e)[:120]}
+    html = data.decode("utf-8", "ignore")
+    items, got_page, pages, total = parse_wraps_catalog(html)
+    result = {"ok": True, "items": items, "page": got_page or page, "pages": pages, "total": total}
+    with _wraps_cache_lock:
+        if len(_wraps_cache) > 40:
+            _wraps_cache.clear()
+        _wraps_cache[key] = (time.time(), result)
+    return result
+
+
+def _wraps_filename(headers, wid):
+    cd = headers.get("Content-Disposition") or ""
+    name = ""
+    m = re.search(r"filename\*=UTF-8''([^;]+)", cd, re.I)
+    if m:
+        name = urllib.parse.unquote(m.group(1).strip().strip('"'))
+    else:
+        m = re.search(r'filename="([^"]+)"', cd) or re.search(r"filename=([^;]+)", cd)
+        if m:
+            name = m.group(1).strip().strip('"')
+    name = sanitize_name(name) or (wid + ".png")
+    root, ext = os.path.splitext(name)
+    if ext.lower() != ".png":
+        name = (root or wid) + ".png"
+    return sanitize_name(name) or (wid + ".png")
+
+
+def wraps_install(wid):
+    """下载 wraps.cc 的 PNG 并写入已挂载车机 U 盘的 Wraps/."""
+    wid = (wid or "").strip()
+    if not _WRAP_ID.match(wid):
+        return False, "无效的涂装编号"
+    if not usb_attached or not os.path.ismount(MNT):
+        return False, "车机U盘未连接, 请先点「连接车机U盘」"
+    try:
+        status, headers, data, _final = _wraps_open(
+            "https://wraps.cc/api/download/" + wid, _WRAP_MAX)
+    except Exception as e:
+        return False, "下载失败: " + str(e)[:120]
+    ctype = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if status != 200 or ctype != "image/png" or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False, "wraps.cc 没有返回涂装文件 (未登录时同一网络每天只能下载 1 次)"
+    if len(data) > _WRAP_MAX:
+        return False, "涂装文件超过 2MB, 车机无法使用"
+    dest = usb_real("Wraps")
+    if dest is None:
+        return False, "目标路径无效"
+    if not os.path.isdir(dest):
+        try:
+            os.makedirs(dest, exist_ok=True)
+        except OSError:
+            return False, "创建 Wraps 目录失败"
+    fn = _wraps_filename(headers, wid)
+    with open(os.path.join(dest, fn), "wb") as f:
+        f.write(data)
+    subprocess.run(["sync"], capture_output=True)
+    return True, "已写入 Wraps/" + fn + " (%d KB)" % (len(data) // 1024)
 
 
 def serve_file(self, fp):
@@ -6196,6 +6449,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif os.path.isfile(ep):
                     files.append({"name": e, "size": os.path.getsize(ep)})
             self._json({"ok": True, "dir": d, "dirs": dirs, "files": files})
+        elif path == "/api/wraps/catalog":
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            self._json(wraps_catalog(
+                q.get("q", [""])[0], q.get("model", [""])[0],
+                q.get("sort", [""])[0], q.get("page", ["1"])[0]))
         elif path == "/api/usb/browse":
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             fp = usb_real(q.get("dir", [""])[0])
@@ -6624,7 +6882,7 @@ class Handler(BaseHTTPRequestHandler):
             if fn == "TOOBIG":
                 self._json({"ok": False, "msg": "文件超过 3MB"}, 400)
                 return
-            fn = safe_name(fn)
+            fn = sanitize_name(fn)
             if not fn or not data or not fn.lower().endswith((".css", ".jpg", ".jpeg", ".png", ".webp")):
                 self._json({"ok": False, "msg": "仅支持 css/jpg/png/webp"}, 400)
                 return
@@ -6641,7 +6899,8 @@ class Handler(BaseHTTPRequestHandler):
             if fn == "TOOBIG":
                 self._json({"ok": False, "msg": "文件超过 3MB (车机要求 <1MB)"}, 400)
                 return
-            fn = safe_name(fn)
+            raw = os.path.basename((fn or "").replace("\\", "/"))
+            fn = sanitize_name(fn)
             if not fn or not data or not fn.lower().endswith((".wav", ".mp3")):
                 self._json({"ok": False, "msg": "仅支持 wav/mp3"}, 400)
                 return
@@ -6650,19 +6909,32 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with open(os.path.join(AUDIO_Q, fn), "wb") as f:
                 f.write(data)
-            self._json({"ok": True, "msg": "已加入队列, 归档同步时写入车机U盘"})
+            renamed = ("已改名为 %s, " % fn) if raw != fn else ""
+            self._json({"ok": True, "msg": renamed + "已加入队列, 归档同步时写入车机U盘"})
         elif path == "/api/usb/attach":
             ok, msg = usb_attach()
             self._json({"ok": ok, "msg": "车机U盘已连接 (已临时断开车机读取, 5分钟无操作自动恢复)" if ok and msg != "already" else ("已处于管理状态" if ok else msg)})
         elif path == "/api/usb/detach":
             ok, msg = usb_detach()
             self._json({"ok": ok, "msg": "已恢复车机导出" if ok else msg})
+        elif path == "/api/wraps/install":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                if not 2 <= n <= 200:
+                    raise ValueError("size")
+                body = json.loads(self.rfile.read(n))
+                wid = body.get("id") if isinstance(body, dict) else ""
+            except Exception:
+                self._json({"ok": False, "msg": "参数错误"}, 400)
+                return
+            ok, msg = wraps_install(wid)
+            self._json({"ok": ok, "msg": msg}, 200 if ok else 400)
         elif path == "/api/upload/usb":
             fn, data, fields = self._read_upload()
             if fn == "TOOBIG":
                 self._json({"ok": False, "msg": "文件超过 100MB 上限"}, 400)
                 return
-            fn = safe_name(fn)
+            fn = sanitize_name(fn)
             if not fn or not data:
                 self._json({"ok": False, "msg": "无效的文件"}, 400)
                 return
@@ -6670,20 +6942,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "msg": "车机U盘未连接, 请先点「连接车机U盘」"}, 400)
                 return
             dest = usb_real(fields.get("path"))
+            rel = os.path.relpath(dest, MNT).replace("\\", "/") if dest else ""
+            # 出厂镜像常没有涂装目录; 界面承诺上传到 Wraps/ 时自动创建, 其它路径仍要求已存在
+            if dest and rel == "Wraps" and not os.path.isdir(dest):
+                try:
+                    os.makedirs(dest, exist_ok=True)
+                except OSError:
+                    self._json({"ok": False, "msg": "创建 Wraps 目录失败"}, 500)
+                    return
             if dest is None or not os.path.isdir(dest):
                 self._json({"ok": False, "msg": "目标目录不存在"}, 400)
                 return
             with open(os.path.join(dest, fn), "wb") as f:
                 f.write(data)
             subprocess.run(["sync"], capture_output=True)
-            rel = os.path.relpath(dest, MNT).replace("\\", "/")
             self._json({"ok": True, "msg": f"已上传到 U盘/{'' if rel == '.' else rel + '/' }{fn} ({len(data)//1024} KB)"})
         elif path == "/api/upload/file":
             fn, data, fields = self._read_upload()
             if fn == "TOOBIG":
                 self._json({"ok": False, "msg": "文件超过 100MB 上限"}, 400)
                 return
-            fn = safe_name(fn)
+            fn = sanitize_name(fn)
             if not fn or not data:
                 self._json({"ok": False, "msg": "无效的文件"}, 400)
                 return
