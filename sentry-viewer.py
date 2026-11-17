@@ -23,6 +23,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 import http.client
+import http.cookiejar
 import ssl
 import zipfile
 import tempfile
@@ -87,7 +88,8 @@ LANG_TABLE.setdefault("en", {}).update({
     "记录仪图标": "Dashcam", "菜单保存": "Menu",
     "这段有行车遥测": "Driving telemetry included",
     "手动保存片段通常带 SEI 数据，播放时可查看车速、挡位、踏板和刹车。":
-        "Saved clips usually carry SEI data; speed, gear, pedals and braking are available during playback."})
+        "Saved clips usually carry SEI data; speed, gear, pedals and braking are available during playback.",
+    "打开麦特云": "Open MyTeslaCloud"})
 I18N_JS = json.dumps(LANG_TABLE, ensure_ascii=False, separators=(",", ":"))
 MAX_UPLOAD = 100 * 1024 * 1024  # 通用文件上传上限 100MB (皮肤/音频有自己的更小限制)
 
@@ -217,7 +219,7 @@ def wifi_connect_worker(iface, ssid, password, key_mgmt):
 # ---------------- 版本与在线升级 (OTA) ----------------
 # 升级方式: 从 GitHub 仓库拉 version.json (清单) 比对版本号, 再下 sentry-viewer.py 覆盖本机文件并重启。
 # 国内直连 raw.githubusercontent 多数能通, 同时内置镜像源兜底, 依次尝试。
-APP_VERSION = "2.8.2"
+APP_VERSION = "2.8.3"
 OTA_REPO = os.environ.get("TSF_OTA_REPO", "cos003/tesla-sentry-f50")
 _OTA_DEFAULT = ",".join([
     "https://raw.githubusercontent.com/%s/main" % OTA_REPO,
@@ -719,13 +721,15 @@ html[data-theme="light"] .chip.d.on { color:var(--teal-deep); }
   box-shadow:0 0 14px rgba(10,150,149,.55); transition:width .4s; }
 
 /* 主题切换 / 图标按钮 */
-#theme, #gear, #out {
+#theme, #gear, #out, #cloudhome {
   background:rgba(255,255,255,.03); border:1px solid var(--line); color:var(--muted);
   font-size:15px; cursor:pointer; border-radius:var(--r-ctl); width:34px; height:32px;
   display:inline-grid; place-items:center;
   transition:color .18s,border-color .18s,background .18s;
 }
-#theme:hover, #gear:hover, #out:hover { color:var(--text); border-color:var(--line2); background:rgba(255,255,255,.06); }
+#theme:hover, #gear:hover, #out:hover, #cloudhome:hover { color:var(--text); border-color:var(--line2); background:rgba(255,255,255,.06); }
+#cloudhome { display:none; text-decoration:none; }
+#cloudhome.on { display:inline-grid; }
 #gear { position:relative; }
 #gear.hasupd::after { content:''; position:absolute; top:4px; right:4px; width:7px; height:7px;
   border-radius:50%; background:var(--teal-bright); box-shadow:0 0 0 2px var(--headbg); }
@@ -1189,7 +1193,7 @@ html[data-theme="light"] .toast { color:#fff; }
   header { padding:10px 14px; }
   header .sub { display:none; }
   .tabs { order:10; width:100%; margin-left:0; }
-  #theme { order:4; margin-left:0; } #gear { order:5; margin-left:0; } #out { order:6; margin-left:0; }
+  #theme { order:4; margin-left:0; } #cloudhome { order:5; } #gear { order:6; margin-left:0; } #out { order:7; margin-left:0; }
   .filters { padding-left:14px; padding-right:14px; }
   #filters { flex-wrap:wrap; overflow:visible; row-gap:6px; }
   #filters .flab { display:none; }
@@ -1228,7 +1232,7 @@ html[data-theme="light"] .toast { color:#fff; }
 </style></head><body>
 <header><h1>🚗 特斯拉哨兵查看器</h1><span class="sub" id="stat"></span>
 <span id="live" title="车机在线只读同步状态" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:4px 10px;white-space:nowrap"><span id="livedot" style="width:7px;height:7px;border-radius:50%;background:#5f6b76"></span><span id="livetxt">同步状态</span></span>
-<nav class="tabs" id="tabs"></nav><button id="theme" title="主题: 自动/浅色/深色" onclick="cycleTheme()">🌗</button><a class="seilink" href="/sei-diagnostics" title="SEI 解析诊断">SEI 诊断</a><button id="gear" title="设置">⚙</button></header>
+<nav class="tabs" id="tabs"></nav><button id="theme" title="主题: 自动/浅色/深色" onclick="cycleTheme()">🌗</button><a class="seilink" href="/sei-diagnostics" title="SEI 解析诊断">SEI 诊断</a><a id="cloudhome" target="_blank" rel="noopener noreferrer" title="打开麦特云">☁</a><button id="gear" title="设置">⚙</button></header>
 <nav class="storwrap" id="storwrap" style="display:none">
   <div class="storcard">
     <div class="storrow"><span class="storlab" id="storlab">车载U盘存储</span><span class="storval" id="storval"></span></div>
@@ -1241,6 +1245,36 @@ html[data-theme="light"] .toast { color:#fff; }
 <div class="grid-wrap" id="grid"></div>
 <div class="empty" id="empty" style="display:none"><div class="big">📹</div>
 <div>暂无归档视频<br><small style="font-size:12px">车机录制后, 归档同步任务会自动把视频收进来 (镜像需空闲10分钟)</small></div></div>
+<div id="tab-wraps" style="display:none;max-width:1120px;margin:0 auto;padding:14px 18px 64px">
+  <div class="hint">车机涂装/牌照图片写入 U 盘根目录 Wraps/ (车机 Toybox → Paint Shop → Wraps 里选)。连接时会临时断开车机读取几秒。</div>
+  <div id="wraps-status" style="margin-bottom:10px"></div>
+  <div class="hint">从 <a href="https://wraps.cc/" target="_blank" rel="noopener" style="color:var(--teal-bright)">wraps.cc</a> 搜索并一键写入车机。登录后可连续下载；未登录时同一网络每天只能下载 1 次。</div>
+  <div id="wraps-auth" style="margin-bottom:10px"></div>
+  <div style="display:flex;gap:8px;margin-bottom:8px">
+    <input id="wraps-q" placeholder="搜索涂装, 如 police / 樱花" onkeydown="if(event.key==='Enter')searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:9px 12px;font-size:12px;outline:none">
+    <button class="mini primary" onclick="searchWraps(1)">搜索</button>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:10px">
+    <select id="wraps-model" onchange="searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:8px 10px;font-size:12px">
+      <option value="">全部车型</option>
+      <option value="model3">Model 3</option>
+      <option value="modely">Model Y</option>
+      <option value="modely-l">Model Y L</option>
+      <option value="models">Model S</option>
+      <option value="modelx">Model X</option>
+      <option value="cybertruck">Cybertruck</option>
+    </select>
+    <select id="wraps-sort" onchange="searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:8px 10px;font-size:12px">
+      <option value="popular" selected>最多下载</option>
+      <option value="">最新</option>
+      <option value="liked">最多喜欢</option>
+    </select>
+  </div>
+  <div id="wraps-catalog" style="display:flex;flex-wrap:wrap;gap:10px"></div>
+  <div id="wraps-pager" style="display:flex;gap:8px;align-items:center;margin:8px 0 14px;font-size:12px;color:var(--muted)"></div>
+  <label class="upbtn" id="wraps-upbtn">＋ 从本机上传到 Wraps/ (png/jpg/webp, ≤100MB)<input type="file" id="wraps-file" accept=".png,.jpg,.jpeg,.webp" hidden multiple></label>
+  <div id="wraps-grid" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:12px"></div>
+</div>
 
 <div class="detail" id="edetail">
   <div class="dtop">
@@ -1324,7 +1358,6 @@ html[data-theme="light"] .toast { color:#fff; }
   <div class="stabs">
     <button class="stab active" id="st-files" onclick="stab('files')">📂 文件</button>
     <button class="stab" id="st-audio" onclick="stab('audio')">🔊 锁车语音</button>
-    <button class="stab" id="st-wraps" onclick="stab('wraps')">🚙 涂装</button>
     <button class="stab" id="st-notify" onclick="stab('notify')">🔔 推送</button>
     <button class="stab" id="st-cloud" onclick="stab('cloud')">☁ 麦特云</button>
     <button class="stab" id="st-wifi" onclick="stab('wifi')">📶 Wi-Fi</button>
@@ -1340,41 +1373,12 @@ html[data-theme="light"] .toast { color:#fff; }
     <div id="skin-list"></div>
   </div>
   <div id="tab-audio" style="display:none">
-    <div class="hint">上传的音频 (wav/mp3, &lt;1MB) 会直接写入车机U盘根目录；文件名为 LockChime.wav 的即锁车音 (特斯拉只认根目录这个文件名)。文件在归档同步时写入车机U盘。</div>
+    <div class="hint">点「设为锁车音」会立刻把该 WAV 写成车机 U 盘根目录的 LockChime.wav (临时断开车机读取几秒)。其它音频仍在归档同步时写入根目录。</div>
     <label class="upbtn">＋ 上传音频 (wav/mp3, &lt;1MB)<input type="file" id="audio-file" accept=".wav,.mp3" hidden></label>
     <div class="hint" style="color:var(--green)">⏳ 待写入车机U盘:</div>
     <div id="audio-list"></div>
     <div class="hint" style="color:var(--green)">✅ 已写入:</div>
     <div id="audio-done"></div>
-  </div>
-  <div id="tab-wraps" style="display:none">
-    <div class="hint">车机涂装/牌照图片写入 U 盘根目录 Wraps/ (车机 Toybox → Paint Shop → Wraps 里选)。连接时会临时断开车机读取几秒。</div>
-    <div id="wraps-status" style="margin-bottom:10px"></div>
-    <div class="hint">从 <a href="https://wraps.cc/" target="_blank" rel="noopener" style="color:var(--teal-bright)">wraps.cc</a> 搜索并一键写入车机。未登录时同一网络每天只能下载 1 次。</div>
-    <div style="display:flex;gap:8px;margin-bottom:8px">
-      <input id="wraps-q" placeholder="搜索涂装, 如 police / 樱花" onkeydown="if(event.key==='Enter')searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:9px 12px;font-size:12px;outline:none">
-      <button class="mini primary" onclick="searchWraps(1)">搜索</button>
-    </div>
-    <div style="display:flex;gap:8px;margin-bottom:10px">
-      <select id="wraps-model" onchange="searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:8px 10px;font-size:12px">
-        <option value="">全部车型</option>
-        <option value="model3">Model 3</option>
-        <option value="modely">Model Y</option>
-        <option value="modely-l">Model Y L</option>
-        <option value="models">Model S</option>
-        <option value="modelx">Model X</option>
-        <option value="cybertruck">Cybertruck</option>
-      </select>
-      <select id="wraps-sort" onchange="searchWraps(1)" style="flex:1;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:8px 10px;font-size:12px">
-        <option value="popular" selected>最多下载</option>
-        <option value="">最新</option>
-        <option value="liked">最多喜欢</option>
-      </select>
-    </div>
-    <div id="wraps-catalog" style="display:flex;flex-wrap:wrap;gap:10px"></div>
-    <div id="wraps-pager" style="display:flex;gap:8px;align-items:center;margin:8px 0 14px;font-size:12px;color:var(--muted)"></div>
-    <label class="upbtn" id="wraps-upbtn">＋ 从本机上传到 Wraps/ (png/jpg/webp, ≤100MB)<input type="file" id="wraps-file" accept=".png,.jpg,.jpeg,.webp" hidden multiple></label>
-    <div id="wraps-grid" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:12px"></div>
   </div>
   <div id="tab-files">
     <div style="display:flex;gap:8px;margin-bottom:10px">
@@ -1743,16 +1747,49 @@ async function load() {
   tabs.innerHTML = '';
   for (const c of Object.keys(data)) {
     const b = document.createElement('button');
-    b.className = 'tab' + (c === 'SentryClips' ? ' active' : '');
+    b.className = 'tab' + (!wrapsOpen && c === currentCat ? ' active' : '');
     b.textContent = `${t(CATS_NAME[c] || c)} (${data[c].length})`;
-    b.onclick = () => { document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); b.classList.add('active'); currentCat = c; reasonFilter = 'all'; dateFilter = 'all'; render(c); };
+    b.onclick = () => selectCat(c);
     tabs.appendChild(b);
   }
+  const wraps = document.createElement('button');
+  wraps.id = 'tab-wraps-btn';
+  wraps.className = 'tab' + (wrapsOpen ? ' active' : '');
+  wraps.textContent = '🚙 ' + t('涂装');
+  wraps.onclick = showWraps;
+  tabs.appendChild(wraps);
   document.getElementById('stat').textContent = `${t('归档')} ${Object.values(data).reduce((a, v) => a + v.length, 0)} ${t('个事件')}`;
   lastSig = sigOf(data);
   renderQSel();
-  render(currentCat);
-  openDeepLink();
+  if (wrapsOpen) showWraps();
+  else { render(currentCat); openDeepLink(); }
+}
+let wrapsOpen = false;
+function selectCat(c) {
+  wrapsOpen = false;
+  document.getElementById('tab-wraps').style.display = 'none';
+  document.getElementById('grid').style.display = '';
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  const tabs = document.getElementById('tabs');
+  const idx = Object.keys(data).indexOf(c);
+  if (tabs.children[idx]) tabs.children[idx].classList.add('active');
+  currentCat = c; reasonFilter = 'all'; dateFilter = 'all'; render(c);
+}
+function showWraps() {
+  wrapsOpen = true;
+  if (document.getElementById('player').classList.contains('open')) closePlayer();
+  closeDetail();
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  const b = document.getElementById('tab-wraps-btn');
+  if (b) b.classList.add('active');
+  document.getElementById('filters').className = 'filters';
+  document.getElementById('dfilters').className = 'filters';
+  document.getElementById('grid').style.display = 'none';
+  document.getElementById('empty').style.display = 'none';
+  document.getElementById('tab-wraps').style.display = 'block';
+  refreshWraps();
+  refreshWrapsAuth();
+  if (!window._wrapsLoaded) searchWraps(1);
 }
 
 /* 支持 ?ev=SentryClips/2026-11-04_12-30-00 直接打开某个事件 */
@@ -1836,7 +1873,7 @@ async function refreshLive() {
         if (c) b.textContent = `${t(CATS_NAME[c] || c)} (${d[c].length})`;
       });
       document.getElementById('stat').textContent = `${t('归档')} ${Object.values(d).reduce((a, v) => a + v.length, 0)} ${t('个事件')}`;
-      if (!document.getElementById('player').classList.contains('open') && !document.getElementById('edetail').classList.contains('open')) render(currentCat);
+      if (!wrapsOpen && !document.getElementById('player').classList.contains('open') && !document.getElementById('edetail').classList.contains('open')) render(currentCat);
     }
   } catch (e) {}
 }
@@ -2825,7 +2862,7 @@ function doLogout() {
   location.href = '/logout';
 }
 function stab(which) {
-  ['files', 'audio', 'wraps', 'notify', 'cloud', 'wifi', 'auth', 'lang', 'skin', 'update'].forEach(k => {
+  ['files', 'audio', 'notify', 'cloud', 'wifi', 'auth', 'lang', 'skin', 'update'].forEach(k => {
     const b = document.getElementById('st-' + k), t = document.getElementById('tab-' + k);
     if (b) b.classList.toggle('active', k === which);
     if (t) t.style.display = k === which ? '' : 'none';
@@ -2835,7 +2872,6 @@ function stab(which) {
   if (which === 'auth') pwLoad();
   if (which === 'cloud') cloudLoad();
   if (which === 'wifi') wifiLoad();
-  if (which === 'wraps') { refreshWraps(); if (!window._wrapsLoaded) searchWraps(1); }
 }
 
 /* ---------- 飞书推送 ---------- */
@@ -3016,10 +3052,18 @@ async function wifiConnect() {
 }
 
 /* ---------- 麦特云设备绑定 ---------- */
+function cloudHome(j) {
+  const a=document.getElementById('cloudhome');
+  if(!a) return;
+  if(j&&j.enrolled&&/^https:\/\/[A-Za-z0-9.-]+(?::\d+)?\/dashboard$/.test(j.home||'')){
+    a.href=j.home; a.classList.add('on'); a.title=t('打开麦特云');
+  } else { a.classList.remove('on'); a.removeAttribute('href'); }
+}
 async function cloudLoad() {
   const m=document.getElementById('cloud-msg'), b=document.getElementById('cloud-enroll-btn');
   try {
     const res=await fetch('/api/cloud/enroll',{cache:'no-store'}), j=await res.json();
+    cloudHome(j);
     b.disabled=!j.available||j.enrolled;
     m.textContent=j.enrolled?(j.running?'已绑定 · 上传服务运行中':'已绑定 · 上传服务未运行，请检查服务日志'):(j.available?'尚未绑定':'绑定不可用：'+(j.reason||'请检查设备配置'));
   } catch(e) { m.textContent='状态获取失败'; b.disabled=true; }
@@ -3142,6 +3186,8 @@ async function otaRollback() {
     if (j.ok) otaWaitBack();
   } catch (e) { msg.textContent = '回滚失败: ' + e; }
 }
+/* 已绑定麦特云时，主页顶栏显示云图标，点开即进入云端面板 */
+cloudLoad().catch(() => {});
 /* 打开首页后静默检查一次 (结果缓存 10 分钟), 有新版本时齿轮上亮红点 */
 setTimeout(() => {
   fetch('/api/ota/check', { cache: 'no-store' }).then(r => r.json()).then(j => {
@@ -3228,7 +3274,7 @@ async function refreshAudio() {
 async function setLock(f) {
   const r = await fetch('/api/audio/setlockchime', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: f }) });
   const j = await r.json();
-  toast(j.ok ? '✅ 已设为锁车音 (LockChime.wav)' : '❌ ' + j.msg);
+  toast(j.ok ? '✅ ' + j.msg : '❌ ' + j.msg);
   refreshAudio();
 }
 async function delAudio(f, isDone) {
@@ -3314,6 +3360,85 @@ document.getElementById('wraps-file').onchange = async function () {
   this.value = '';
   refreshWraps();
 };
+const wrapField = 'flex:1;min-width:0;background:rgba(0,0,0,.26);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:9px 12px;font-size:12px;outline:none';
+async function refreshWrapsAuth() {
+  const box = document.getElementById('wraps-auth');
+  if (!box) return;
+  let j = {};
+  try { j = await (await fetch('/api/wraps/session')).json(); } catch (e) { return; }
+  box.innerHTML = '';
+  if (j.email) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:8px';
+    const line = document.createElement('div');
+    line.className = 'hint';
+    line.style.cssText = 'margin:0;flex:1';
+    line.textContent = 'wraps.cc 已登录 ' + j.email + '，可以连续写入';
+    const btn = document.createElement('button');
+    btn.className = 'mini';
+    btn.textContent = '退出';
+    btn.onclick = wrapsLogout;
+    row.append(line, btn);
+    box.appendChild(row);
+    return;
+  }
+  const emailRow = document.createElement('div');
+  emailRow.style.cssText = 'display:flex;gap:8px;margin-bottom:8px';
+  const email = document.createElement('input');
+  email.id = 'wraps-email';
+  email.type = 'email';
+  email.placeholder = 'wraps.cc 邮箱';
+  email.autocomplete = 'email';
+  email.style.cssText = wrapField;
+  const send = document.createElement('button');
+  send.className = 'mini primary';
+  send.textContent = '发送验证码';
+  send.onclick = wrapsSendCode;
+  emailRow.append(email, send);
+  const codeRow = document.createElement('div');
+  codeRow.id = 'wraps-code-row';
+  codeRow.style.cssText = 'display:none;gap:8px;margin-bottom:8px';
+  const code = document.createElement('input');
+  code.id = 'wraps-code';
+  code.inputMode = 'numeric';
+  code.maxLength = 6;
+  code.placeholder = '6 位验证码';
+  code.autocomplete = 'one-time-code';
+  code.style.cssText = wrapField;
+  code.onkeydown = (ev) => { if (ev.key === 'Enter') wrapsVerifyCode(); };
+  const go = document.createElement('button');
+  go.className = 'mini primary';
+  go.textContent = '登录';
+  go.onclick = wrapsVerifyCode;
+  codeRow.append(code, go);
+  box.append(emailRow, codeRow);
+}
+async function wrapsSendCode() {
+  const email = (document.getElementById('wraps-email').value || '').trim();
+  const r = await fetch('/api/wraps/login/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
+  const j = await r.json().catch(() => ({}));
+  toast((j.ok ? '✅ ' : '❌ ') + (j.msg || '发送失败'));
+  if (j.ok) {
+    const row = document.getElementById('wraps-code-row');
+    if (row) row.style.display = 'flex';
+    const code = document.getElementById('wraps-code');
+    if (code) code.focus();
+  }
+}
+async function wrapsVerifyCode() {
+  const email = (document.getElementById('wraps-email').value || '').trim();
+  const code = (document.getElementById('wraps-code').value || '').trim();
+  const r = await fetch('/api/wraps/login/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code }) });
+  const j = await r.json().catch(() => ({}));
+  toast((j.ok ? '✅ ' : '❌ ') + (j.msg || '登录失败'));
+  if (j.ok) refreshWrapsAuth();
+}
+async function wrapsLogout() {
+  const r = await fetch('/api/wraps/logout', { method: 'POST' });
+  const j = await r.json().catch(() => ({}));
+  toast((j.ok ? '✅ ' : '❌ ') + (j.msg || '退出失败'));
+  refreshWrapsAuth();
+}
 async function searchWraps(page) {
   const box = document.getElementById('wraps-catalog');
   const pager = document.getElementById('wraps-pager');
@@ -3607,8 +3732,29 @@ def cloud_enroll_status():
                                      stderr=subprocess.DEVNULL).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             pass
-    return {"available": available, "enrolled": enrolled, "running": running,
-            "reason": "请启用网页登录保护并确认 Pi 上已安装 systemd 上传组件" if not available else ""}
+    status = {"available": available, "enrolled": enrolled, "running": running,
+              "reason": "请启用网页登录保护并确认 Pi 上已安装 systemd 上传组件" if not available else ""}
+    if enrolled:
+        status["home"] = cloud_public_home(config)
+    return status
+
+
+def cloud_public_home(path):
+    """Public dashboard link only. Device credentials in cloud.json never leave this process."""
+    fallback = "https://www.myteslacloud.com/dashboard"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.loads(f.read(65536))
+        server = data.get("server") if isinstance(data, dict) else ""
+        url = urllib.parse.urlsplit(server)
+        host = url.hostname or ""
+        if (url.scheme == "https" and host and not url.username and not url.password
+                and not url.query and not url.fragment and url.path in ("", "/")
+                and re.fullmatch(r"[A-Za-z0-9.-]+", host)):
+            return server.rstrip("/") + "/dashboard"
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return fallback
 
 
 def cloud_enroll_once(code):
@@ -3918,10 +4064,59 @@ def usb_real(p):
     return rp
 
 
+def install_lockchime(data):
+    """把锁车音直接写成车机 U 盘根目录的 LockChime.wav.
+
+    镜像没挂上时临时挂载写入, 写完立即卸下并恢复车机导出。
+    网页已经连着 U 盘时只写文件, 不改变连接状态。
+    """
+    if not data or len(data) > 1024 * 1024:
+        return False, "车机要求单个音频 <1MB, 请裁剪后重试"
+    brought_up = not (usb_attached and os.path.ismount(MNT))
+    if brought_up:
+        ok, msg = usb_attach()
+        if not ok:
+            return False, msg
+    dest = os.path.join(MNT, "LockChime.wav")
+    err = None
+    try:
+        root = os.path.realpath(MNT)
+        real = os.path.realpath(dest)
+        if os.path.dirname(real) != root or os.path.basename(real) != "LockChime.wav":
+            err = "目标路径无效"
+        else:
+            with open(dest, "wb") as f:
+                f.write(data)
+            subprocess.run(["sync"], capture_output=True)
+    except OSError as exc:
+        err = "写入失败: " + str(exc)[:120]
+    detach_msg = None
+    if brought_up:
+        ok, msg = usb_detach()
+        if not ok:
+            detach_msg = msg
+    if err:
+        return False, err
+    if detach_msg:
+        return False, "已写入根目录, 但恢复车机导出失败: " + detach_msg
+    if brought_up:
+        return True, "已写入车机U盘根目录 LockChime.wav, 车机读取已恢复"
+    return True, "已写入车机U盘根目录 LockChime.wav"
+
+
 _WRAP_MODELS = {"", "model3", "modely", "modely-l", "models", "modelx", "cybertruck"}
 _WRAP_SORTS = {"", "popular", "liked"}
 _WRAP_ID = re.compile(r"^[A-Za-z0-9]{6,32}$")
+_WRAP_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _WRAP_MAX = 2 * 1024 * 1024
+_WRAP_AUTH_MSG = {
+    "invalid_email": "邮箱格式不对",
+    "too_many": "发送太频繁, 请稍后再试",
+    "bad_code": "验证码不正确",
+    "send_failed": "验证码发送失败",
+    "bad_link": "登录链接无效",
+}
+WRAPS_COOKIE = os.environ.get("TSF_WRAPS_COOKIE", "/opt/tesla-sentry/wraps.cookies")
 _wraps_cache = {}
 _wraps_cache_lock = threading.Lock()
 
@@ -3961,23 +4156,136 @@ def parse_wraps_catalog(html):
     return items, page, pages, total
 
 
-def _wraps_open(url, limit):
-    req = urllib.request.Request(url, headers={
+def _wraps_jar():
+    jar = http.cookiejar.MozillaCookieJar(WRAPS_COOKIE)
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except OSError:
+        pass
+    return jar
+
+
+def _wraps_save_jar(jar):
+    parent = os.path.dirname(WRAPS_COOKIE) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    jar.save(ignore_discard=True, ignore_expires=True)
+    os.chmod(WRAPS_COOKIE, 0o600)
+
+
+def _jar_has_wraps(jar):
+    return any((c.domain or "").lstrip(".").endswith("wraps.cc") and not c.is_expired() for c in jar)
+
+
+def _wraps_email(email):
+    email = (email or "").strip().lower()
+    if len(email) > 120 or not _WRAP_EMAIL.fullmatch(email):
+        return ""
+    return email
+
+
+def _wraps_auth_error(data, fallback):
+    try:
+        err = json.loads((data or b"").decode("utf-8", "ignore") or "{}").get("error")
+    except Exception:
+        err = None
+    return _WRAP_AUTH_MSG.get(err, fallback)
+
+
+def _wraps_open(url, limit, method="GET", payload=None):
+    jar = _wraps_jar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    headers = {
         "User-Agent": "tsf-sentry/" + APP_VERSION,
         "Accept-Language": "zh-CN,zh;q=0.9",
-    })
+        "Origin": "https://wraps.cc",
+        "Referer": "https://wraps.cc/login",
+    }
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        resp = urllib.request.urlopen(req, timeout=20)
+        resp = opener.open(req, timeout=20)
     except urllib.error.HTTPError as e:
-        body = e.read(4096)
+        body = e.read(min(limit, 8192))
+        final = e.geturl() if hasattr(e, "geturl") else url
         e.close()
-        return e.code, e.headers, body, e.geturl() if hasattr(e, "geturl") else url
+        return e.code, e.headers, body, final, jar
     with resp:
         final = resp.geturl()
         host = urllib.parse.urlsplit(final).hostname
         if host != "wraps.cc":
             raise OSError("wraps.cc 跳转到了其它站点")
-        return resp.status, resp.headers, resp.read(limit + 1), final
+        body = resp.read(limit + 1)
+        return resp.status, resp.headers, body, final, jar
+
+
+def wraps_session():
+    try:
+        status, _headers, data, _final, _jar = _wraps_open("https://wraps.cc/api/auth/me", 8192)
+    except Exception as e:
+        return {"ok": False, "email": "", "msg": "无法访问 wraps.cc: " + str(e)[:120]}
+    email = ""
+    try:
+        user = json.loads(data.decode("utf-8", "ignore") or "{}").get("user") or {}
+        if isinstance(user, dict):
+            email = str(user.get("email") or "")[:120]
+    except Exception:
+        email = ""
+    if status != 200:
+        return {"ok": False, "email": "", "msg": "无法确认登录状态"}
+    return {"ok": True, "email": email}
+
+
+def wraps_login_request(email):
+    email = _wraps_email(email)
+    if not email:
+        return False, "邮箱格式不对"
+    try:
+        status, _headers, data, _final, _jar = _wraps_open(
+            "https://wraps.cc/api/auth/request", 8192, method="POST",
+            payload={"email": email, "next": "/", "lang": "zh"})
+    except Exception as e:
+        return False, "无法访问 wraps.cc: " + str(e)[:120]
+    if status == 200:
+        return True, "验证码已发送到 " + email
+    return False, _wraps_auth_error(data, "验证码发送失败")
+
+
+def wraps_login_verify(email, code):
+    email = _wraps_email(email)
+    if not email:
+        return False, "邮箱格式不对"
+    code = re.sub(r"\s+", "", code or "")
+    if not re.fullmatch(r"\d{6}", code):
+        return False, "请输入 6 位验证码"
+    try:
+        status, _headers, data, _final, jar = _wraps_open(
+            "https://wraps.cc/api/auth/verify-code", 8192, method="POST",
+            payload={"email": email, "code": code, "lang": "zh"})
+    except Exception as e:
+        return False, "无法访问 wraps.cc: " + str(e)[:120]
+    if status != 200 or not _jar_has_wraps(jar):
+        return False, _wraps_auth_error(data, "登录失败")
+    try:
+        _wraps_save_jar(jar)
+    except OSError:
+        return False, "登录成功但没能保存会话"
+    return True, "已登录 " + email
+
+
+def wraps_logout():
+    try:
+        _wraps_open("https://wraps.cc/api/auth/logout", 4096, method="POST", payload={})
+    except Exception:
+        pass
+    try:
+        os.remove(WRAPS_COOKIE)
+    except OSError:
+        pass
+    return True, "已退出 wraps.cc"
 
 
 def wraps_catalog(q, model, sort, page):
@@ -4002,7 +4310,7 @@ def wraps_catalog(q, model, sort, page):
     if sort:
         params["sort"] = sort
     try:
-        _status, _headers, data, _final = _wraps_open(
+        _status, _headers, data, _final, _jar = _wraps_open(
             "https://wraps.cc/zh?" + urllib.parse.urlencode(params), 1024 * 1024)
     except Exception as e:
         return {"ok": False, "msg": "无法访问 wraps.cc: " + str(e)[:120]}
@@ -4041,12 +4349,14 @@ def wraps_install(wid):
     if not usb_attached or not os.path.ismount(MNT):
         return False, "车机U盘未连接, 请先点「连接车机U盘」"
     try:
-        status, headers, data, _final = _wraps_open(
+        status, headers, data, _final, jar = _wraps_open(
             "https://wraps.cc/api/download/" + wid, _WRAP_MAX)
     except Exception as e:
         return False, "下载失败: " + str(e)[:120]
     ctype = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
     if status != 200 or ctype != "image/png" or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        if _jar_has_wraps(jar):
+            return False, "下载失败: " + _wraps_auth_error(data, "wraps.cc 没有返回涂装文件")
         return False, "wraps.cc 没有返回涂装文件 (未登录时同一网络每天只能下载 1 次)"
     if len(data) > _WRAP_MAX:
         return False, "涂装文件超过 2MB, 车机无法使用"
@@ -6454,6 +6764,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(wraps_catalog(
                 q.get("q", [""])[0], q.get("model", [""])[0],
                 q.get("sort", [""])[0], q.get("page", ["1"])[0]))
+        elif path == "/api/wraps/session":
+            self._json(wraps_session())
         elif path == "/api/usb/browse":
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             fp = usb_real(q.get("dir", [""])[0])
@@ -6917,6 +7229,34 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/usb/detach":
             ok, msg = usb_detach()
             self._json({"ok": ok, "msg": "已恢复车机导出" if ok else msg})
+        elif path == "/api/wraps/login/request":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                if not 2 <= n <= 400:
+                    raise ValueError("size")
+                body = json.loads(self.rfile.read(n))
+                email = body.get("email") if isinstance(body, dict) else ""
+            except Exception:
+                self._json({"ok": False, "msg": "参数错误"}, 400)
+                return
+            ok, msg = wraps_login_request(email)
+            self._json({"ok": ok, "msg": msg}, 200 if ok else 400)
+        elif path == "/api/wraps/login/verify":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                if not 2 <= n <= 400:
+                    raise ValueError("size")
+                body = json.loads(self.rfile.read(n))
+                email = body.get("email") if isinstance(body, dict) else ""
+                code = body.get("code") if isinstance(body, dict) else ""
+            except Exception:
+                self._json({"ok": False, "msg": "参数错误"}, 400)
+                return
+            ok, msg = wraps_login_verify(email, code)
+            self._json({"ok": ok, "msg": msg}, 200 if ok else 400)
+        elif path == "/api/wraps/logout":
+            ok, msg = wraps_logout()
+            self._json({"ok": ok, "msg": msg})
         elif path == "/api/wraps/install":
             try:
                 n = int(self.headers.get("Content-Length", 0))
@@ -7004,9 +7344,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not name.lower().endswith(".wav"):
                     self._json({"ok": False, "msg": "锁车音必须是 WAV (mp3 只能当喇叭音效)"})
                     return
-                with open(os.path.join(AUDIO_Q, "LockChime.wav"), "wb") as f:
-                    f.write(data)
-                self._json({"ok": True})
+                ok, msg = install_lockchime(data)
+                if ok:
+                    with open(os.path.join(AUDIO_Q, "LockChime.wav"), "wb") as f:
+                        f.write(data)
+                self._json({"ok": ok, "msg": msg}, 200 if ok else 500)
             else:
                 self._json({"ok": False, "msg": "文件不存在"}, 404)
         else:

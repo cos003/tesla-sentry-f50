@@ -53,6 +53,18 @@ class CloudEnrollTest(unittest.TestCase):
         self.assertEqual([x[0] for x in calls], ['post', 'save'])
         self.assertEqual(run.call_args.args[0], ['/bin/sh', str(self.installer), str(self.config.parent)])
 
+    def test_home_link_only_after_enrollment_and_never_includes_credentials(self):
+        secret = 'device-token-must-stay-local'
+        self.config.write_text('{"server":"https://www.myteslacloud.com","device_token":"%s"}' % secret)
+        with mock.patch.object(viewer.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)):
+            status = viewer.cloud_enroll_status()
+            self.assertEqual(status['home'], 'https://www.myteslacloud.com/dashboard')
+            self.assertNotIn(secret, str(status))
+            self.config.write_text('{"server":"http://evil.example/steal","device_token":"%s"}' % secret)
+            self.assertEqual(viewer.cloud_enroll_status()['home'], 'https://www.myteslacloud.com/dashboard')
+            self.config.unlink()
+            self.assertNotIn('home', viewer.cloud_enroll_status())
+
 
 if __name__ == '__main__':
     unittest.main()
